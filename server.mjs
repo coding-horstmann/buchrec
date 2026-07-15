@@ -7,7 +7,7 @@ const app = express();
 const port = Number(process.env.PORT || 3000);
 const username = process.env.APP_USERNAME;
 const password = process.env.APP_PASSWORD;
-const production = process.env.NODE_ENV === "production";
+const production = process.env.NODE_ENV === "production" || Boolean(process.env.RAILWAY_ENVIRONMENT_NAME);
 
 if (production && (!username || !password)) {
   throw new Error("APP_USERNAME und APP_PASSWORD muessen in Produktion gesetzt sein.");

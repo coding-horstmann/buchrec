@@ -39,7 +39,7 @@ Das Matching berücksichtigt unter anderem Referenzen, Beträge, Gegenparteien, 
 
 ## Lokal entwickeln und prüfen
 
-Voraussetzung: Node.js 22.12 oder neuer und pnpm 11.
+Voraussetzung: Node.js 22.13 oder neuer und pnpm 11.
 
 ```bash
 pnpm install --frozen-lockfile
