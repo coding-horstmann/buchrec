@@ -1,0 +1,27 @@
+node_modules/
+dist/
+.vite/
+coverage/
+.env
+.env.*
+!.env.example
+*.local
+
+# Finanz- und Projektdaten duerfen niemals committed werden.
+*.csv
+*.CSV
+*.tsv
+*.xls
+*.xlsx
+*.buchrec.json
+uploads/
+data/
+local-data/
+
+# Lokale Verifikation und Werkzeugzustand
+.local/
+.tmp/
+playwright-report/
+test-results/
+*.log
+
