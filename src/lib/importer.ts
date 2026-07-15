@@ -155,9 +155,11 @@ function value(row: RowObject, map: Map<string, string>, ...names: string[]): Ce
   for (const name of names) {
     const normalized = normalizeHeader(name);
     const exact = map.get(normalized);
-    if (exact) return row[exact];
-    const partial = [...map.entries()].find(([key]) => key.includes(normalized) || normalized.includes(key));
-    if (partial) return row[partial[1]];
+    if (exact) {
+      const entry = row[exact];
+      const text = String(entry ?? "").trim();
+      if (text && text !== "--") return entry;
+    }
   }
   return "";
 }
@@ -167,6 +169,13 @@ function inferShop(fileName: string, rows: RowObject[], map: Map<string, string>
     .map((row) => String(value(row, map, "Store Name") ?? "").trim())
     .find(Boolean);
   if (explicit) return explicit;
+
+  if (kind === "shopify-orders") {
+    const vendors = Array.from(
+      new Set(rows.map((row) => String(value(row, map, "Vendor") ?? "").trim()).filter(Boolean)),
+    );
+    if (vendors.length === 1) return vendors[0];
+  }
 
   const normalized = normalizeText(fileName);
   if (/\bfrida\b/.test(normalized)) return "Frida";
@@ -243,29 +252,51 @@ function parseAccountableExpenses(source: SourceImport, rows: RowObject[], map: 
 }
 
 function parseAccountableInvoices(source: SourceImport, rows: RowObject[], map: Map<string, string>): NormalizedRecord[] {
-  return rows.flatMap((row, index) => {
-    const amount = Math.abs(parseAmount(value(row, map, "Gesamtbetrag")));
-    const customer = String(value(row, map, "Kundenname") ?? "").trim();
-    if (!amount && !customer) return [];
-    const invoiceType = String(value(row, map, "Rechnung Type") ?? "");
+  const groups = new Map<string, Array<{ row: RowObject; index: number }>>();
+  rows.forEach((row, index) => {
+    const reference = String(value(row, map, "Einkommenszahl") ?? "").trim();
+    const invoiceType = String(value(row, map, "Rechnung Type") ?? "").trim();
+    const key = reference ? `${normalizeText(invoiceType)}|${reference}` : `row|${index}`;
+    groups.set(key, [...(groups.get(key) ?? []), { row, index }]);
+  });
+
+  return [...groups.values()].flatMap((entries) => {
+    const usable = entries.filter(({ row }) => {
+      const amount = Math.abs(parseAmount(value(row, map, "Gesamtbetrag")));
+      const customer = String(value(row, map, "Kundenname") ?? "").trim();
+      return Boolean(amount || customer);
+    });
+    if (!usable.length) return [];
+
+    const first = usable[0];
+    const firstValue = (...names: string[]) => usable.map(({ row }) => value(row, map, ...names)).find((entry) => String(entry ?? "").trim()) ?? "";
+    const amount = roundMoney(usable.reduce((sum, { row }) => sum + Math.abs(parseAmount(value(row, map, "Gesamtbetrag"))), 0));
+    const vatAmount = roundMoney(usable.reduce((sum, { row }) => sum + parseAmount(value(row, map, "USt.-Betrag")), 0));
+    const customer = String(firstValue("Kundenname")).trim();
+    const invoiceType = String(firstValue("Rechnung Type"));
     const isCredit = normalizeText(invoiceType).includes("credit");
-    const reference = String(value(row, map, "Einkommenszahl") ?? "");
-    const base = recordBase(source, source.headerRow + index + 1, "document-income", isCredit ? "out" : "in", amount);
+    const reference = String(firstValue("Einkommenszahl"));
+    const descriptions = Array.from(
+      new Set(usable.map(({ row }) => String(value(row, map, "Name Des Artikels") ?? "").trim()).filter(Boolean)),
+    );
+    const base = recordBase(source, source.headerRow + first.index + 1, "document-income", isCredit ? "out" : "in", amount);
     return [{
       ...base,
-      date: parseDate(value(row, map, "Rechnungsdatum")),
-      dueDate: parseDate(value(row, map, "Fälligkeitsdatum")),
+      date: parseDate(firstValue("Rechnungsdatum")),
+      dueDate: parseDate(firstValue("Fälligkeitsdatum")),
       amount,
-      currency: String(value(row, map, "Währung") || "EUR"),
+      currency: String(firstValue("Währung") || "EUR"),
       counterparty: customer,
       reference,
-      relatedReferences: referenceTokens(reference, value(row, map, "Name Des Artikels")),
-      description: String(value(row, map, "Name Des Artikels") || invoiceType),
+      relatedReferences: referenceTokens(reference, ...descriptions),
+      description: descriptions.join(" · ") || invoiceType,
       metadata: compactMetadata({
-        paymentDate: value(row, map, "Zahlungsdatum"),
-        status: value(row, map, "Status"),
+        paymentDate: firstValue("Zahlungsdatum"),
+        status: firstValue("Status"),
         invoiceType,
-        vatAmount: value(row, map, "USt.-Betrag"),
+        vatAmount,
+        lineCount: usable.length,
+        sourceRows: usable.map(({ index }) => source.headerRow + index + 1).join(", "),
       }),
     }];
   });
@@ -371,19 +402,32 @@ function parseEtsySales(source: SourceImport, rows: RowObject[], map: Map<string
     if (!gross && !orderId) return [];
     const fees = Math.abs(parseAmount(value(row, map, "Fees")));
     const net = Math.abs(parseAmount(value(row, map, "Net Amount")));
+    const listingAmount = Math.abs(parseAmount(value(row, map, "Listing Amount")));
+    const vatAmount = Math.abs(parseAmount(value(row, map, "VAT Amount")));
     const paymentId = String(value(row, map, "Payment ID") ?? "");
     const base = recordBase(source, source.headerRow + index + 1, "order", "in", gross);
     return [{
       ...base,
-      date: parseDate(value(row, map, "Order Date")),
+      date: parseDate(value(row, map, "Order Date"), "mdy"),
       settlementAmount: net,
       feeAmount: fees,
       currency: String(value(row, map, "Currency") || "EUR"),
-      counterparty: String(value(row, map, "Buyer Name") || value(row, map, "Buyer") || ""),
+      counterparty: String(value(row, map, "Buyer") || value(row, map, "Buyer Name") || ""),
       reference: orderId,
       relatedReferences: referenceTokens(orderId, paymentId),
       description: `Etsy-Bestellung ${orderId}`,
-      metadata: compactMetadata({ paymentId, status: value(row, map, "Status"), refundAmount: value(row, map, "Refund Amount") }),
+      metadata: compactMetadata({
+        paymentId,
+        status: value(row, map, "Status"),
+        refundAmount: value(row, map, "Refund Amount"),
+        sellerRevenue: gross,
+        paymentProcessingFees: fees,
+        payoutContribution: net,
+        listingAmount,
+        listingCurrency: value(row, map, "Listing Currency"),
+        vatAmount,
+        marketplaceSalesTaxIncludedInSellerRevenue: false,
+      }),
     }];
   });
 }
@@ -418,7 +462,11 @@ function parseEtsyStatement(source: SourceImport, rows: RowObject[], map: Map<st
     const gross = parseAmount(value(row, map, "Betrag"));
     const fee = parseAmount(value(row, map, "Gebühren & Steuern"));
     const net = parseAmount(value(row, map, "Netto"));
-    if (!type && !gross && !net) return [];
+    const info = String(value(row, map, "Info") ?? "");
+    const title = String(value(row, map, "Titel") ?? "");
+    const orderId = `${info} ${title}`.match(/order\s*#?\s*(\d+)/i)?.[1] ?? "";
+    const payoutAmount = normalizedType.includes("uberweisung") ? Math.abs(parseAmount(title)) : 0;
+    if (!type && !gross && !net && !payoutAmount) return [];
     let category: RecordCategory = "unknown";
     let direction: Direction = directionFromAmount(net || gross);
     if (normalizedType === "sale") { category = "sale"; direction = "in"; }
@@ -426,10 +474,9 @@ function parseEtsyStatement(source: SourceImport, rows: RowObject[], map: Map<st
     else if (normalizedType.includes("refund")) { category = "refund"; direction = "out"; }
     else if (normalizedType.includes("uberweisung")) { category = "payout"; direction = "in"; }
     else if (normalizedType.includes("zahlung")) { category = "transfer"; }
-    const amount = Math.abs(gross || net);
+    const returnedDeposit = normalizeText(title).includes("returned deposit");
+    const amount = Math.abs(payoutAmount || gross || net);
     const base = recordBase(source, source.headerRow + index + 1, category, direction, amount);
-    const info = String(value(row, map, "Info") ?? "");
-    const title = String(value(row, map, "Titel") ?? "");
     return [{
       ...base,
       date: parseDate(value(row, map, "Datum")),
@@ -437,10 +484,22 @@ function parseEtsyStatement(source: SourceImport, rows: RowObject[], map: Map<st
       feeAmount: Math.abs(fee),
       currency: String(value(row, map, "Währung") || "EUR"),
       counterparty: "Etsy",
-      reference: info,
-      relatedReferences: referenceTokens(info, title),
+      reference: orderId || info || (category === "payout" ? String(amount) : ""),
+      relatedReferences: referenceTokens(orderId, info, title),
       description: `${type} · ${title || info}`,
-      metadata: compactMetadata({ type, title, info, gross, fee, net, taxInfo: value(row, map, "Steuerliche Angaben") }),
+      disposition: returnedDeposit ? "ignored" : base.disposition,
+      dispositionReason: returnedDeposit ? "Zurückgegebene Etsy-Auszahlung" : undefined,
+      metadata: compactMetadata({
+        type,
+        title,
+        info,
+        orderId,
+        sellerRevenue: category === "sale" ? Math.abs(gross || net) : 0,
+        feesAndTaxes: fee,
+        payoutContribution: net,
+        payoutAmount: category === "payout" ? amount : 0,
+        taxInfo: value(row, map, "Steuerliche Angaben"),
+      }),
     }];
   });
 }
@@ -448,18 +507,25 @@ function parseEtsyStatement(source: SourceImport, rows: RowObject[], map: Map<st
 function parseEbayOrders(source: SourceImport, rows: RowObject[], map: Map<string, string>): NormalizedRecord[] {
   return rows.flatMap((row, index) => {
     const orderId = String(value(row, map, "Bestellnummer") ?? "");
-    const amount = Math.abs(parseAmount(value(row, map, "Gesamtbetrag inkl. der von eBay eingezogenen Steuer und Gebühren", "Gesamtbetrag")));
-    if (!orderId && !amount) return [];
+    const amount = Math.abs(parseAmount(value(row, map, "Gesamtbetrag", "Gesamtbetrag inkl. der von eBay eingezogenen Steuer und Gebühren")));
+    if (!amount && !/^\d{2}-\d{5}-\d{5}$/.test(orderId)) return [];
+    const buyerName = String(value(row, map, "Name des Käufers") ?? "").trim();
+    const buyerUsername = String(value(row, map, "Nutzername des Käufers") ?? "").trim();
     const base = recordBase(source, source.headerRow + index + 1, "order", "in", amount);
     return [{
       ...base,
-      date: parseDate(value(row, map, "Zahlungsdatum", "Verkauft am")),
+      date: parseDate(value(row, map, "Zahlungsdatum", "Verkauft am"), "german-named"),
       currency: "EUR",
-      counterparty: String(value(row, map, "Name des Käufers") ?? ""),
+      counterparty: buyerName && buyerName !== "--" ? buyerName : buyerUsername.replace(/^--$/, ""),
       reference: orderId,
       relatedReferences: referenceTokens(orderId, value(row, map, "Transaktionsnummer"), value(row, map, "PayPal-Transaktionsnummer")),
       description: String(value(row, map, "Angebotstitel") || `eBay-Bestellung ${orderId}`),
-      metadata: compactMetadata({ soldAt: value(row, map, "Verkauft am"), quantity: value(row, map, "Anzahl") }),
+      metadata: compactMetadata({
+        soldAt: value(row, map, "Verkauft am"),
+        quantity: value(row, map, "Anzahl"),
+        ebayCollectedTax: value(row, map, "Von eBay eingezogene Steuer"),
+        sellerCollectedTax: value(row, map, "Vom Verkäufer eingezogene Steuer"),
+      }),
     }];
   });
 }
@@ -483,14 +549,25 @@ function parseEbayLedger(source: SourceImport, rows: RowObject[], map: Map<strin
     const base = recordBase(source, source.headerRow + index + 1, category, direction, amount);
     return [{
       ...base,
-      date: parseDate(category === "payout" ? value(row, map, "Auszahlungsdatum") : value(row, map, "Datum der Transaktionserstellung")),
+      date: parseDate(
+        category === "payout" ? value(row, map, "Datum der Transaktionserstellung", "Auszahlungsdatum") : value(row, map, "Datum der Transaktionserstellung"),
+        "german-named",
+      ),
       settlementAmount: Math.abs(settlement),
+      feeAmount: category === "sale" ? roundMoney(Math.abs(gross) - Math.abs(settlement)) : undefined,
       currency: String(value(row, map, "Transaktionswährung", "Auszahlungswährung") || "EUR"),
       counterparty: category === "payout" ? "eBay" : String(value(row, map, "Name des Käufers") || "eBay"),
-      reference: payoutId || orderId || String(value(row, map, "Referenznummer") || ""),
+      reference: category === "payout" ? payoutId || String(value(row, map, "Referenznummer") || "") : orderId || String(value(row, map, "Referenznummer") || ""),
       relatedReferences: referenceTokens(orderId, payoutId, value(row, map, "Transaktionsnummer"), value(row, map, "Referenznummer")),
       description: String(value(row, map, "Beschreibung") || type),
-      metadata: compactMetadata({ type, orderId, payoutId, payoutStatus: value(row, map, "Auszahlungsstatus") }),
+      metadata: compactMetadata({
+        type,
+        orderId,
+        payoutId,
+        payoutStatus: value(row, map, "Auszahlungsstatus"),
+        ebayCollectedTax: value(row, map, "Von eBay eingezogene Steuer"),
+        sellerCollectedTax: value(row, map, "Vom Verkäufer eingezogene Steuer"),
+      }),
     }];
   });
 }
@@ -644,12 +721,22 @@ function parseRecords(source: SourceImport, rows: RowObject[], headers: string[]
   }
 }
 
-function sourceWarnings(kind: SourceKind, records: NormalizedRecord[]): string[] {
+function sourceWarnings(kind: SourceKind, records: NormalizedRecord[], shop?: string): string[] {
   const warnings: string[] = [];
   if (kind === "unknown") warnings.push("Dateistruktur wurde nicht erkannt.");
   if (kind === "bank-dkb-ignored") warnings.push("DKB ist nach Projektvorgabe vollständig ausgeschlossen.");
   if (!records.length && kind !== "bank-dkb-ignored" && kind !== "unknown") warnings.push("Keine verwertbaren Datensätze erkannt.");
-  if (records.some((record) => !record.date)) warnings.push("Einzelne Datensätze haben kein erkennbares Datum.");
+  const missingDates = records.filter((record) => !record.date).length;
+  if (missingDates) warnings.push(`${missingDates} Datensätze haben kein erkennbares Datum.`);
+  const missingCounterparties = records.filter(
+    (record) =>
+      (record.category === "document-expense" || record.category === "document-income" || record.category === "order") &&
+      !record.counterparty.trim(),
+  ).length;
+  if (missingCounterparties) warnings.push(`${missingCounterparties} Belege oder Bestellungen haben keine Gegenpartei.`);
+  if ((kind.startsWith("etsy") || kind.startsWith("shopify")) && (!shop || normalizeText(shop).includes("bitte zuordnen"))) {
+    warnings.push("Shop konnte nicht eindeutig aus dem Dateiinhalt erkannt werden und muss zugeordnet werden.");
+  }
   return warnings;
 }
 
@@ -704,7 +791,7 @@ export async function parseImportFile(file: File): Promise<ParsedFileResult> {
     source.rowCount = parsedRecords.length || rows.length;
     source.dateMin = dated[0];
     source.dateMax = dated.at(-1);
-    source.warnings = sourceWarnings(kind, parsedRecords);
+    source.warnings = sourceWarnings(kind, parsedRecords, shop);
     sources.push(source);
     records.push(...parsedRecords);
   }
@@ -721,5 +808,21 @@ export function applyShopifyAllowList(records: NormalizedRecord[], shop: string,
       disposition: genuine ? "active" : "test",
       dispositionReason: genuine ? undefined : "Vom Nutzer als Testbestellung klassifiziert",
     };
+  });
+}
+
+export function applyGlobalTestIdentities(records: NormalizedRecord[], identities: string[]): NormalizedRecord[] {
+  const testNames = new Set(identities.map(normalizeText).filter(Boolean));
+  return records.map((record) => {
+    if (record.sourceKind !== "shopify-orders" || record.amount === 0) return record;
+    const customer = normalizeText(record.counterparty);
+    const isKnownTest = testNames.has(customer);
+    if (isKnownTest) {
+      return { ...record, disposition: "test", dispositionReason: "Globale Testidentität" };
+    }
+    if (record.dispositionReason === "Globale Testidentität") {
+      return { ...record, disposition: "active", dispositionReason: undefined };
+    }
+    return record;
   });
 }

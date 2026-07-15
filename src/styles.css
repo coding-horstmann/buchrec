@@ -102,7 +102,7 @@ h1, h2, .brand-name, .coverage-number { font-family: ui-sans-serif, system-ui, -
 .progress-track { overflow: hidden; height: 6px; margin: 9px 0; border-radius: 9px; background: #e8ece8; }
 .progress-track span { display: block; height: 100%; border-radius: inherit; background: var(--green); transition: width .3s ease; }
 
-.coverage-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.coverage-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
 .coverage-card { padding: 22px; border: 1px solid var(--line); border-radius: 16px; background: #fff; }
 .coverage-card-head { display: grid; grid-template-columns: 36px 1fr auto; align-items: center; gap: 10px; }
 .metric-icon { display: grid; width: 36px; height: 36px; place-items: center; border-radius: 10px; color: var(--green); background: var(--green-soft); }
@@ -188,6 +188,8 @@ tbody tr:hover { background: #fafcf9; }
 .setting-card p { color: var(--muted); line-height: 1.55; }
 .setting-card label { display: grid; max-width: 180px; grid-template-columns: 1fr 90px; align-items: center; gap: 10px; margin-top: 8px; color: var(--muted); font-size: .8rem; }
 .setting-card input { width: 100%; padding: 8px; border: 1px solid var(--line); border-radius: 8px; }
+.setting-card label:has(textarea) { max-width: 100%; grid-template-columns: 1fr; }
+.setting-card textarea { width: 100%; resize: vertical; padding: 10px; border: 1px solid var(--line); border-radius: 8px; font: inherit; }
 .privacy-card { grid-column: 1 / -1; }
 .privacy-card strong { color: var(--green); font-size: .8rem; }
 .empty-panel { display: grid; min-height: 240px; place-items: center; align-content: center; padding: 30px; color: var(--muted); text-align: center; }

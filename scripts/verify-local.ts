@@ -1,7 +1,8 @@
 import { File } from "node:buffer";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { parseImportFile } from "../src/lib/importer";
+import { applyGlobalTestIdentities, parseImportFile } from "../src/lib/importer";
+import { createProject } from "../src/lib/project";
 import { coverageSummary, runMatching } from "../src/lib/matching";
 import type { NormalizedRecord, SourceImport, SourceKind } from "../src/types";
 
@@ -43,7 +44,8 @@ async function main() {
         },
       ]),
   ) as Partial<Record<SourceKind, { sources: number; records: number }>>;
-  const matching = runMatching(records, 20);
+  const classifiedRecords = applyGlobalTestIdentities(records, createProject().settings.testIdentities);
+  const matching = runMatching(classifiedRecords, 20);
   const output = {
     files: paths.length,
     sources: sources.length,
@@ -53,7 +55,7 @@ async function main() {
     warningCount: sources.reduce((sum, source) => sum + source.warnings.length, 0),
     automaticLinks: matching.links.length,
     candidates: matching.candidates.length,
-    coverage: coverageSummary(records, matching.links),
+    coverage: coverageSummary(classifiedRecords, matching.links),
   };
   process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
 }

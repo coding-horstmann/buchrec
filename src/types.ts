@@ -82,9 +82,13 @@ export type LinkType =
   | "document-payment"
   | "document-order"
   | "platform-evidence"
+  | "platform-settlement"
   | "payout-bank"
+  | "paypal-related"
+  | "paypal-bank-bridge"
   | "internal-transfer"
   | "wallet-bridge"
+  | "group-payment"
   | "manual";
 
 export interface MatchLink {
@@ -115,6 +119,7 @@ export interface ProjectSettings {
   year: number;
   dateToleranceDays: number;
   amountTolerance: number;
+  testIdentities: string[];
   shopifyRules: ShopifyRule[];
 }
 
@@ -143,6 +148,7 @@ export interface MatchResult {
 export interface CoverageSummary {
   documents: { total: number; resolved: number; open: number };
   payments: { total: number; resolved: number; open: number };
+  bridges: { total: number; resolved: number; open: number };
   orders: { total: number; resolved: number; excluded: number; open: number };
   exceptions: number;
 }

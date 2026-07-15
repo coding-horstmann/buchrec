@@ -1,6 +1,6 @@
 import * as XLSX from "xlsx";
 import { describe, expect, it } from "vitest";
-import { applyShopifyAllowList, parseImportFile } from "./importer";
+import { applyGlobalTestIdentities, applyShopifyAllowList, parseImportFile } from "./importer";
 
 function csvFile(name: string, content: string): File {
   return new File([content], name, { type: "text/csv" });
@@ -44,20 +44,32 @@ describe("file importer", () => {
     const file = csvFile(
       "neuer-shop bestellungen.csv",
       [
-        "Name,Financial Status,Paid at,Currency,Total,Created at,Billing Name,Shipping Name,Payment Method,Payment Reference",
-        "#1001,paid,2025-05-02,EUR,39.90,2025-05-02,Echte Person,Echte Person,PayPal,P-1",
-        "#1001,,,,,,,Echte Person,,",
-        "#1002,paid,,EUR,0.00,2025-05-03,Test Person,Test Person,,",
-        "#1003,paid,2025-05-04,EUR,50.00,2025-05-04,Noch Test,Noch Test,PayPal,P-3",
+        "Name,Financial Status,Paid at,Currency,Total,Created at,Billing Name,Shipping Name,Payment Method,Payment Reference,Vendor",
+        "#1001,paid,2025-05-02,EUR,39.90,2025-05-02,Echte Person,Echte Person,PayPal,P-1,Neuer Shop",
+        "#1001,,,,,,,Echte Person,,,Neuer Shop",
+        "#1002,paid,,EUR,0.00,2025-05-03,Test Person,Test Person,,,Neuer Shop",
+        "#1003,paid,2025-05-04,EUR,50.00,2025-05-04,Noch Test,Noch Test,PayPal,P-3,Neuer Shop",
       ].join("\n"),
     );
     const result = await parseImportFile(file);
     expect(result.sources[0].kind).toBe("shopify-orders");
+    expect(result.sources[0].shop).toBe("Neuer Shop");
     expect(result.records).toHaveLength(3);
     expect(result.records.find((record) => record.reference === "#1002")?.disposition).toBe("test");
     const classified = applyShopifyAllowList(result.records, result.sources[0].shop!, ["Echte Person"]);
     expect(classified.find((record) => record.reference === "#1001")?.disposition).toBe("active");
     expect(classified.find((record) => record.reference === "#1003")?.disposition).toBe("test");
+  });
+
+  it("applies editable test identities across Shopify shops", async () => {
+    const file = csvFile(
+      "shop.csv",
+      "Name,Financial Status,Paid at,Currency,Total,Created at,Billing Name,Shipping Name,Payment Method,Payment Reference,Vendor\n#1,paid,2025-05-02,EUR,67.43,2025-05-02,Niklas Horstmann,Niklas Horstmann,PayPal,P-1,Shop",
+    );
+    const result = await parseImportFile(file);
+    const classified = applyGlobalTestIdentities(result.records, ["Niklas Horstmann"]);
+    expect(classified[0]).toMatchObject({ disposition: "test", dispositionReason: "Globale Testidentität" });
+    expect(applyGlobalTestIdentities(classified, [])[0]).toMatchObject({ disposition: "active", dispositionReason: undefined });
   });
 
   it("imports both relevant Accountable sheets", async () => {
@@ -75,6 +87,7 @@ describe("file importer", () => {
       XLSX.utils.aoa_to_sheet([
         ["Einkommenszahl", "Rechnung Type", "Status", "Rechnungsdatum", "Kundenname", "Gesamtbetrag", "Währung"],
         ["R-1", "invoice", "Bezahlt", "02.01.2025", "Kunde", 39.9, "EUR"],
+        ["R-1", "invoice", "Bezahlt", "02.01.2025", "Kunde", 10.1, "EUR"],
       ]),
       "Rechnungen",
     );
@@ -83,5 +96,27 @@ describe("file importer", () => {
     const result = await parseImportFile(new File([bytes], "accountable.xlsx"));
     expect(result.sources.map((source) => source.kind)).toEqual(["accountable-expenses", "accountable-invoices"]);
     expect(result.records.map((record) => record.category)).toEqual(["tax-payment", "document-income"]);
+    expect(result.records[1]).toMatchObject({ reference: "R-1", amount: 50 });
+    expect(result.records[1].metadata.lineCount).toBe(2);
+  });
+
+  it("uses source-specific Etsy and eBay date formats", async () => {
+    const etsy = csvFile(
+      "etsy-sales.csv",
+      [
+        "Payment ID,Buyer Username,Buyer Name,Order ID,Gross Amount,Fees,Net Amount,Currency,Listing Amount,Listing Currency,VAT Amount,Status,Order Date,Buyer,Refund Amount",
+        "P-1,user,First,1234567890,32.55,1.72,30.83,EUR,35.58,EUR,0,SETTLED,02/01/2025,Full Buyer,0",
+      ].join("\n"),
+    );
+    const ebay = csvFile(
+      "ebay-orders.csv",
+      [
+        "Verkaufsprotokollnummer;Bestellnummer;Gesamtbetrag;Verkauft am;Zahlungsdatum;Nutzername des Käufers;Name des Käufers",
+        "1;23-12345-12345;116,99 €;10-Dez-25;10-Dez-25;buyer;--",
+      ].join("\n"),
+    );
+    const [etsyResult, ebayResult] = await Promise.all([parseImportFile(etsy), parseImportFile(ebay)]);
+    expect(etsyResult.records[0]).toMatchObject({ date: "2025-02-01", counterparty: "Full Buyer", amount: 32.55 });
+    expect(ebayResult.records[0]).toMatchObject({ date: "2025-12-10", amount: 116.99 });
   });
 });

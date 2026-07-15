@@ -12,6 +12,12 @@ describe("normalization", () => {
   it("parses supported dates without changing the day", () => {
     expect(parseDate("10.01.2025")).toBe("2025-01-10");
     expect(parseDate("2025-12-31T22:10:00+01:00")).toBe("2025-12-31");
+    expect(parseDate("02/01/2025", "mdy")).toBe("2025-02-01");
+    expect(parseDate("15. Dez 2025", "german-named")).toBe("2025-12-15");
+    expect(parseDate("15-Dez-25", "german-named")).toBe("2025-12-15");
+    expect(parseDate("March 3, 2025")).toBe("2025-03-03");
+    expect(parseDate("28. February 2025")).toBe("2025-02-28");
+    expect(parseDate("1. März 2025", "german-named")).toBe("2025-03-01");
   });
 
   it("normalizes headers and compares counterparties", () => {

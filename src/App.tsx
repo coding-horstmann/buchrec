@@ -11,7 +11,7 @@ import { SourcesPanel } from "./components/SourcesPanel";
 import { UploadPanel } from "./components/UploadPanel";
 import { exportAuditWorkbook } from "./lib/exporter";
 import { createDemoProject } from "./lib/demo";
-import { applyShopifyAllowList, parseImportFile } from "./lib/importer";
+import { applyGlobalTestIdentities, applyShopifyAllowList, parseImportFile } from "./lib/importer";
 import { runMatchingInBrowser } from "./lib/matching-client";
 import { coverageSummary, manualLink } from "./lib/matching";
 import { createProject, mergeParsedFiles, preserveUserLinks, updateSourceShop } from "./lib/project";
@@ -25,9 +25,10 @@ function decisionKey(link: MatchLink): string {
 }
 
 function applyShopifyRules(records: NormalizedRecord[], project: BuchrecProject): NormalizedRecord[] {
+  const withTestIdentities = applyGlobalTestIdentities(records, project.settings.testIdentities ?? []);
   return project.settings.shopifyRules.reduce(
     (current, rule) => rule.mode === "allow-list" ? applyShopifyAllowList(current, rule.shop, rule.genuineCustomers) : current,
-    records,
+    withTestIdentities,
   );
 }
 
@@ -46,7 +47,10 @@ function App() {
     if (demoMode) { hydrated.current = true; return; }
     loadProject()
       .then((stored) => {
-        if (stored) { setProject(stored); setSaveState("saved"); }
+        if (stored) {
+          setProject({ ...stored, settings: { ...stored.settings, testIdentities: stored.settings.testIdentities ?? createProject().settings.testIdentities } });
+          setSaveState("saved");
+        }
         hydrated.current = true;
       })
       .catch(() => { hydrated.current = true; setSaveState("error"); });
@@ -107,10 +111,15 @@ function App() {
   const coverage = useMemo(() => coverageSummary(project.records, project.links), [project.records, project.links]);
   const hasData = project.sources.length > 0;
   const activeLinkCount = project.links.filter((link) => !link.rejected).length;
+  const warningCount = project.sources.reduce((sum, source) => sum + source.warnings.length, 0);
 
   const handleProjectFile = async (file: File) => {
     setError(undefined);
-    try { const imported = await readProjectFile(file); setProject(imported); setView("overview"); }
+    try {
+      const imported = await readProjectFile(file);
+      setProject({ ...imported, settings: { ...imported.settings, testIdentities: imported.settings.testIdentities ?? createProject().settings.testIdentities } });
+      setView("overview");
+    }
     catch (cause) { setError(cause instanceof Error ? cause.message : "Projektdatei konnte nicht geöffnet werden."); }
   };
 
@@ -132,11 +141,12 @@ function App() {
 
   const handleSettings = (settings: ProjectSettings) => {
     const base = { ...project, settings };
-    if (settings.dateToleranceDays === project.settings.dateToleranceDays && settings.amountTolerance === project.settings.amountTolerance) {
+    const testIdentitiesChanged = JSON.stringify(settings.testIdentities) !== JSON.stringify(project.settings.testIdentities);
+    if (settings.dateToleranceDays === project.settings.dateToleranceDays && settings.amountTolerance === project.settings.amountTolerance && !testIdentitiesChanged) {
       setProject({ ...base, updatedAt: new Date().toISOString() });
       return;
     }
-    void updateAndReconcile(base, project.records);
+    void updateAndReconcile(base, applyShopifyRules(project.records, base));
   };
 
   const handleDisposition = (ids: string[], disposition: Disposition) => {
@@ -167,7 +177,7 @@ function App() {
           {error && <div className="error-banner" role="alert"><AlertCircle size={19} /><span>{error}</span><button onClick={() => setError(undefined)}>Schließen</button></div>}
           {busy && hasData && <div className="busy-banner" aria-live="polite"><LoaderCircle className="spin" size={18} /> {busyLabel}</div>}
           {!hasData && <><section className="welcome-heading"><span className="eyebrow">Nachvollziehbarer Zahlungsabgleich</span><h1>Belege und Zahlungen.<br />Endlich auf einer Linie.</h1><p>Importiere alle Exporte gemeinsam. buchrec erkennt die Strukturen, bildet Sammelauszahlungen ab und zeigt offen, was noch geprüft werden muss.</p></section><UploadPanel busy={busy} progress={progress} onFiles={handleFiles} onProjectFile={handleProjectFile} /></>}
-          {hasData && view === "overview" && <Overview coverage={coverage} hasData={hasData} candidateCount={project.candidates.length} sourceCount={project.sources.length} linkCount={activeLinkCount} onNavigate={setView} />}
+          {hasData && view === "overview" && <Overview coverage={coverage} hasData={hasData} candidateCount={project.candidates.length} sourceCount={project.sources.length} linkCount={activeLinkCount} warningCount={warningCount} onNavigate={setView} />}
           {hasData && view === "sources" && <div className="view-stack"><SourcesPanel sources={project.sources} onShopChange={handleShopChange} onRemove={handleSourceRemove} /><UploadPanel busy={busy} progress={progress} onFiles={handleFiles} onProjectFile={handleProjectFile} /></div>}
           {hasData && view === "matches" && <MatchesPanel links={project.links} candidates={project.candidates} records={project.records} onAccept={handleAccept} onReject={handleReject} />}
           {hasData && view === "exceptions" && <RecordsTable records={project.records} links={project.links} onlyExceptions onDisposition={handleDisposition} onManualLink={handleManualLink} />}

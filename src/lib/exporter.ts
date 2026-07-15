@@ -1,6 +1,6 @@
 import * as XLSX from "xlsx";
 import type { BuchrecProject, MatchLink, NormalizedRecord } from "../types";
-import { coverageSummary, isReconciliationRecord } from "./matching";
+import { coverageSummary, isReconciliationRecord, reconciliationState } from "./matching";
 
 function recordExport(record: NormalizedRecord) {
   return {
@@ -45,10 +45,11 @@ export function exportAuditWorkbook(project: BuchrecProject): void {
   const workbook = XLSX.utils.book_new();
   const coverage = coverageSummary(project.records, project.links);
   const recordMap = new Map(project.records.map((record) => [record.id, record]));
-  const linked = new Set(project.links.filter((link) => !link.rejected).flatMap((link) => [link.fromId, link.toId]));
+  const state = reconciliationState(project.records, project.links);
   const overview = [
     { Kennzahl: "Accountable-Dokumente", Gesamt: coverage.documents.total, Geklärt: coverage.documents.resolved, Offen: coverage.documents.open },
     { Kennzahl: "Zahlungsbewegungen", Gesamt: coverage.payments.total, Geklärt: coverage.payments.resolved, Offen: coverage.payments.open },
+    { Kennzahl: "PayPal-Brücken", Gesamt: coverage.bridges.total, Geklärt: coverage.bridges.resolved, Offen: coverage.bridges.open },
     { Kennzahl: "Bestellungen", Gesamt: coverage.orders.total, Geklärt: coverage.orders.resolved, Offen: coverage.orders.open },
     { Kennzahl: "Test/Ausgeschlossen", Gesamt: coverage.orders.excluded, Geklärt: coverage.orders.excluded, Offen: 0 },
   ];
@@ -64,7 +65,7 @@ export function exportAuditWorkbook(project: BuchrecProject): void {
     Warnungen: source.warnings.join(" | "),
   }));
   const exceptions = project.records.filter(
-    (record) => record.disposition === "active" && isReconciliationRecord(record) && !linked.has(record.id),
+    (record) => record.disposition === "active" && isReconciliationRecord(record) && state.open.has(record.id),
   );
 
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(overview), "Übersicht");

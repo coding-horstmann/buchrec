@@ -73,7 +73,73 @@ function validDate(year: number, month: number, day: number): string | undefined
     .padStart(2, "0")}`;
 }
 
-export function parseDate(value: unknown): string | undefined {
+export type DateFormat = "auto" | "dmy" | "mdy" | "german-named";
+
+const GERMAN_MONTHS: Record<string, number> = {
+  jan: 1,
+  january: 1,
+  januar: 1,
+  feb: 2,
+  february: 2,
+  februar: 2,
+  mar: 3,
+  march: 3,
+  marz: 3,
+  mrz: 3,
+  apr: 4,
+  april: 4,
+  mai: 5,
+  may: 5,
+  jun: 6,
+  june: 6,
+  juni: 6,
+  jul: 7,
+  july: 7,
+  juli: 7,
+  aug: 8,
+  august: 8,
+  sep: 9,
+  sept: 9,
+  september: 9,
+  okt: 10,
+  october: 10,
+  oktober: 10,
+  nov: 11,
+  november: 11,
+  dez: 12,
+  december: 12,
+  dezember: 12,
+};
+
+function parseNumericDate(text: string, format: "dmy" | "mdy"): string | undefined {
+  const match = text.match(/^(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{2,4})/);
+  if (!match) return undefined;
+  let year = Number(match[3]);
+  if (year < 100) year += year >= 70 ? 1900 : 2000;
+  const first = Number(match[1]);
+  const second = Number(match[2]);
+  return format === "dmy" ? validDate(year, second, first) : validDate(year, first, second);
+}
+
+function parseGermanNamedDate(text: string): string | undefined {
+  const match = normalizeText(text).match(/^(\d{1,2})[.\-/\s]+([a-z]+)\.?[.\-/\s,]+(\d{2,4})/);
+  if (!match) return undefined;
+  let year = Number(match[3]);
+  if (year < 100) year += year >= 70 ? 1900 : 2000;
+  const month = GERMAN_MONTHS[match[2]];
+  return month ? validDate(year, month, Number(match[1])) : undefined;
+}
+
+function parseEnglishNamedDate(text: string): string | undefined {
+  const match = normalizeText(text).match(/^([a-z]+)\s+(\d{1,2}),?\s+(\d{2,4})/);
+  if (!match) return undefined;
+  let year = Number(match[3]);
+  if (year < 100) year += year >= 70 ? 1900 : 2000;
+  const month = GERMAN_MONTHS[match[1]];
+  return month ? validDate(year, month, Number(match[2])) : undefined;
+}
+
+export function parseDate(value: unknown, format: DateFormat = "auto"): string | undefined {
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
     return value.toISOString().slice(0, 10);
   }
@@ -84,12 +150,16 @@ export function parseDate(value: unknown): string | undefined {
   const iso = text.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
   if (iso) return validDate(Number(iso[1]), Number(iso[2]), Number(iso[3]));
 
-  const german = text.match(/^(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{2,4})/);
-  if (german) {
-    let year = Number(german[3]);
-    if (year < 100) year += year >= 70 ? 1900 : 2000;
-    return validDate(year, Number(german[2]), Number(german[1]));
-  }
+  if (format === "mdy") return parseNumericDate(text, "mdy");
+  if (format === "dmy") return parseNumericDate(text, "dmy");
+  if (format === "german-named") return parseGermanNamedDate(text) ?? parseNumericDate(text, "dmy");
+
+  const germanNamed = parseGermanNamedDate(text);
+  if (germanNamed) return germanNamed;
+  const englishNamed = parseEnglishNamedDate(text);
+  if (englishNamed) return englishNamed;
+  const numeric = parseNumericDate(text, "dmy");
+  if (numeric) return numeric;
 
   const parsed = new Date(text);
   return Number.isNaN(parsed.getTime()) ? undefined : parsed.toISOString().slice(0, 10);

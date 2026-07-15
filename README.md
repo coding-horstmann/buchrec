@@ -30,12 +30,16 @@ Die Erkennung orientiert sich an Spalten und Datenstruktur, nicht ausschließlic
 
 1. Alle Exporte gemeinsam importieren.
 2. Erkannte Quellen, Zeiträume und Warnungen kontrollieren.
-3. Unter „Regeln“ die echten Shopify-Kunden markieren. 0-Euro-Bestellungen bleiben automatisch Tests.
+3. Unter „Regeln“ globale Testidentitäten pflegen und bei Bedarf je Shopify-Shop echte Kunden markieren. 0-Euro-Bestellungen bleiben automatisch Tests.
 4. Sichere automatische Zuordnungen und Vorschläge prüfen.
 5. Offene Fälle manuell verbinden oder als geklärt, Test beziehungsweise privat klassifizieren.
 6. Den Excel-Prüfbericht und optional eine lokale Projektdatei exportieren.
 
-Das Matching berücksichtigt unter anderem Referenzen, Beträge, Gegenparteien, Richtung, konfigurierbare Datumsabstände, Plattformauszahlungen, PayPal-Gegenläufe und Printful-Geldbörsenaufladungen. Jede Zuordnung enthält Regel, Sicherheit, Betragsdifferenz und Datumsabstand.
+Das Matching berücksichtigt unter anderem Referenzen, Beträge, Gegenparteien, Richtung, konfigurierbare Datumsabstände, Plattformauszahlungen, PayPal-Gegenläufe, Fremdwährungsumrechnungen und Printful-Geldbörsenaufladungen. PayPal wird dabei als Informationsbrücke behandelt und nicht als zweite Zahlung gezählt. Ein Accountable-Beleg gilt erst als vollständig, wenn seine Beweiskette FYRST oder N26 erreicht.
+
+Bei Etsy werden Verkäuferumsatz, von Etsy abgeführte Marketplace Sales Tax, Gebühren und Auszahlung getrennt geführt. Die vom Käufer zusätzlich gezahlte und von Etsy abgeführte Sales Tax erhöht nicht den mit Accountable abzugleichenden Rechnungsumsatz. Sammelauszahlungen werden nur dann automatisch verbunden, wenn ein einzelnes oder kombiniertes Auszahlungsfenster centgenau aufgeht.
+
+Jede Zuordnung enthält Regel, Sicherheit, Betragsdifferenz und Datumsabstand. Teilzuordnungen bleiben in den Ausnahmen sichtbar, bis das Bankende der Kette nachgewiesen ist.
 
 ## Lokal entwickeln und prüfen
 

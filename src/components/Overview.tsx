@@ -1,4 +1,4 @@
-import { ArrowRight, CheckCircle2, FileCheck2, Landmark, ShoppingBag, TriangleAlert } from "lucide-react";
+import { ArrowRight, CheckCircle2, FileCheck2, Landmark, ShoppingBag, TriangleAlert, WalletCards } from "lucide-react";
 import type { CoverageSummary } from "../types";
 import type { ViewKey } from "./Sidebar";
 
@@ -8,6 +8,7 @@ interface OverviewProps {
   candidateCount: number;
   sourceCount: number;
   linkCount: number;
+  warningCount: number;
   onNavigate: (view: ViewKey) => void;
 }
 
@@ -39,7 +40,7 @@ function CoverageCard({
   );
 }
 
-export function Overview({ coverage, hasData, candidateCount, sourceCount, linkCount, onNavigate }: OverviewProps) {
+export function Overview({ coverage, hasData, candidateCount, sourceCount, linkCount, warningCount, onNavigate }: OverviewProps) {
   if (!hasData) return null;
   return (
     <div className="view-stack">
@@ -52,7 +53,8 @@ export function Overview({ coverage, hasData, candidateCount, sourceCount, linkC
 
       <section className="coverage-grid">
         <CoverageCard icon={FileCheck2} label="Accountable-Belege" resolved={coverage.documents.resolved} total={coverage.documents.total} detail={`${coverage.documents.open} Belege ohne belastbare Zuordnung`} />
-        <CoverageCard icon={Landmark} label="Zahlungen" resolved={coverage.payments.resolved} total={coverage.payments.total} detail={`${coverage.payments.open} Bank- oder PayPal-Buchungen offen`} />
+        <CoverageCard icon={Landmark} label="Bankzahlungen" resolved={coverage.payments.resolved} total={coverage.payments.total} detail={`${coverage.payments.open} FYRST- oder N26-Buchungen offen`} />
+        <CoverageCard icon={WalletCards} label="PayPal-Brücken" resolved={coverage.bridges.resolved} total={coverage.bridges.total} detail={`${coverage.bridges.open} PayPal-Buchungen ohne Bankende`} />
         <CoverageCard icon={ShoppingBag} label="Bestellungen" resolved={coverage.orders.resolved} total={Math.max(0, coverage.orders.total - coverage.orders.excluded)} detail={`${coverage.orders.excluded} Testbestellung${coverage.orders.excluded === 1 ? "" : "en"} ausgeschlossen`} />
       </section>
 
@@ -70,6 +72,7 @@ export function Overview({ coverage, hasData, candidateCount, sourceCount, linkC
           <div className="status-row"><CheckCircle2 size={18} /><span>Erkannte Quellen</span><strong>{sourceCount.toLocaleString("de-DE")}</strong></div>
           <div className="status-row"><CheckCircle2 size={18} /><span>Bestätigte Zuordnungen</span><strong>{linkCount.toLocaleString("de-DE")}</strong></div>
           <div className="status-row candidate"><TriangleAlert size={18} /><span>Vorschläge zur Prüfung</span><strong>{candidateCount.toLocaleString("de-DE")}</strong></div>
+          <div className={`status-row ${warningCount ? "candidate" : ""}`}><TriangleAlert size={18} /><span>Importwarnungen</span><strong>{warningCount.toLocaleString("de-DE")}</strong></div>
           <button className="button button-ghost full-width" onClick={() => onNavigate("matches")}>Zuordnungen ansehen</button>
         </article>
       </section>

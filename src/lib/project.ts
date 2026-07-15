@@ -12,6 +12,7 @@ export function createProject(): BuchrecProject {
       year: new Date().getFullYear() - 1,
       dateToleranceDays: 20,
       amountTolerance: 0.02,
+      testIdentities: ["Niklas Horstmann", "Nik Horstmann", "Niklas Test", "niklas dgfdg", "dsfdsf dsfdsf"],
       shopifyRules: [],
     },
     sources: [],
