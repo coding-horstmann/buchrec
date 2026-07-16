@@ -20,9 +20,13 @@ function Axis({ axis }: { axis: PlatformControlAxis }) {
         <strong>{axis.label}</strong>
       </div>
       <dl>
-        <div><dt>Soll</dt><dd>{formatMoney(axis.expected)}</dd></div>
-        <div><dt>Ist</dt><dd>{formatMoney(axis.actual)}</dd></div>
-        <div><dt>Differenz</dt><dd>{formatMoney(axis.difference)}</dd></div>
+        {axis.mode === "balance" ? (
+          <div><dt>Übertrag</dt><dd>{formatMoney(axis.actual)}</dd></div>
+        ) : <>
+          <div><dt>Soll</dt><dd>{formatMoney(axis.expected)}</dd></div>
+          <div><dt>Ist</dt><dd>{formatMoney(axis.actual)}</dd></div>
+          <div><dt>Differenz</dt><dd>{formatMoney(axis.difference)}</dd></div>
+        </>}
       </dl>
       <small>{axis.detail}</small>
     </article>
@@ -63,7 +67,9 @@ export function PlatformReports({ records, links, year }: PlatformReportsProps) 
             <dl className="platform-formula">
               <div><dt>Käuferzahlungen</dt><dd>{formatMoney(control.buyerPayments)}</dd></div>
               <div><dt>Marketplace Tax</dt><dd>{formatMoney(control.marketplaceTax)}</dd></div>
+              {control.buyerFees > 0 && <div><dt>Buyer Fees</dt><dd>{formatMoney(control.buyerFees)}</dd></div>}
               <div><dt>Verkäuferumsatz</dt><dd>{formatMoney(control.sellerRevenue)}</dd></div>
+              {Math.abs(control.documentRevenue - control.sellerRevenue) > 0.02 && <div><dt>Für Rechnungen relevant</dt><dd>{formatMoney(control.documentRevenue)}</dd></div>}
               <div><dt>Gebühren brutto</dt><dd>{formatMoney(control.feeCharges)}</dd></div>
               {control.feeCorrections > 0 && <div><dt>davon Gebührenkorrekturen</dt><dd>{formatMoney(-control.feeCorrections)}</dd></div>}
               <div><dt>Gebühren netto</dt><dd>{formatMoney(control.fees)}</dd></div>

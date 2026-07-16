@@ -179,8 +179,8 @@ function inferShop(fileName: string, rows: RowObject[], map: Map<string, string>
   }
 
   const normalized = normalizeText(fileName);
-  if (/\bfrida\b/.test(normalized)) return "Frida";
-  if (/\bform\b/.test(normalized)) return "Form";
+  if (/\bfrida\b/.test(normalized) || normalized.includes("fantasiasfloralesco")) return "Frida";
+  if (/\bform\b/.test(normalized) || normalized.includes("formandfunctionde")) return "Form";
   if (normalized.includes("wandmomente")) return "Wandmomente";
   if (normalized.includes("kaparell")) return "Kaparell";
   if (kind.startsWith("etsy")) return "Etsy-Shop · bitte zuordnen";
@@ -319,7 +319,9 @@ function parseFyrst(source: SourceImport, rows: RowObject[], map: Map<string, st
     const purpose = String(value(row, map, "Verwendungszweck") ?? "").trim();
     const reference = String(value(row, map, "Kundenreferenz", "Mandatsreferenz") ?? "");
     const iban = String(value(row, map, "IBAN / Kontonummer") ?? "").replace(/\s+/g, "").toUpperCase();
-    const ownerTransfer = normalizeText(counterparty) === "niklas horstmann";
+    const counterpartyTokens = normalizeText(counterparty).split(" ").filter(Boolean);
+    const ownerTransfer = counterpartyTokens.includes("horstmann")
+      && (counterpartyTokens.includes("niklas") || counterpartyTokens.includes("nik"));
     const n26Transfer = iban === "DE31100110012511694946";
     return [{
       ...base,
@@ -417,6 +419,11 @@ function parseEtsySales(source: SourceImport, rows: RowObject[], map: Map<string
     const net = Math.abs(parseAmount(value(row, map, "Net Amount")));
     const listingAmount = Math.abs(parseAmount(value(row, map, "Listing Amount")));
     const vatAmount = Math.abs(parseAmount(value(row, map, "VAT Amount")));
+    const refundAmount = Math.abs(parseAmount(value(row, map, "Refund Amount")));
+    const adjustedGross = parseAmount(value(row, map, "Adjusted Gross"));
+    const adjustedFees = parseAmount(value(row, map, "Adjusted Fees"));
+    const adjustedNet = parseAmount(value(row, map, "Adjusted Net"));
+    const fullyRefunded = refundAmount > 0 && listingAmount > 0 && refundAmount >= listingAmount - 0.02;
     const paymentId = String(value(row, map, "Payment ID") ?? "");
     const base = recordBase(source, source.headerRow + index + 1, "order", "in", gross);
     return [{
@@ -429,10 +436,16 @@ function parseEtsySales(source: SourceImport, rows: RowObject[], map: Map<string
       reference: orderId,
       relatedReferences: referenceTokens(orderId, paymentId),
       description: `Etsy-Bestellung ${orderId}`,
+      disposition: fullyRefunded ? "resolved" : base.disposition,
+      dispositionReason: fullyRefunded ? "Vollständig über Etsy erstattet; keine Ausgangsrechnung erwartet" : undefined,
       metadata: compactMetadata({
         paymentId,
         status: value(row, map, "Status"),
-        refundAmount: value(row, map, "Refund Amount"),
+        refundAmount,
+        adjustedGross,
+        adjustedFees,
+        adjustedNet,
+        fullyRefunded,
         sellerRevenue: gross,
         paymentProcessingFees: fees,
         payoutContribution: net,
@@ -541,12 +554,14 @@ function parseEtsyStatement(source: SourceImport, rows: RowObject[], map: Map<st
     let category: RecordCategory = "unknown";
     let direction: Direction = directionFromAmount(net || gross);
     if (normalizedType === "sale") { category = "sale"; direction = "in"; }
-    else if (/fee|marketing|tax|buyer fee/.test(normalizedType)) { category = "fee"; direction = "out"; }
+    else if (normalizedType === "buyer fee") { category = "buyer-fee"; }
+    else if (/fee|marketing|tax/.test(normalizedType)) { category = "fee"; }
     else if (normalizedType.includes("refund")) { category = "refund"; direction = "out"; }
     else if (normalizedType.includes("uberweisung")) { category = "payout"; direction = "in"; }
     else if (normalizedType.includes("zahlung")) { category = "transfer"; }
     const returnedDeposit = normalizeText(title).includes("returned deposit");
     const marketplaceTax = normalizedType === "tax" && normalizeText(`${title} ${info}`).includes("sales tax");
+    const marketplaceBuyerFee = normalizedType === "buyer fee";
     const amount = Math.abs(payoutAmount || gross || net);
     const base = recordBase(source, source.headerRow + index + 1, category, direction, amount);
     return [{
@@ -568,6 +583,7 @@ function parseEtsyStatement(source: SourceImport, rows: RowObject[], map: Map<st
         orderId,
         sellerRevenue: category === "sale" ? Math.abs(gross || net) : 0,
         marketplaceTax,
+        marketplaceBuyerFee,
         feesAndTaxes: fee,
         payoutContribution: net,
         payoutAmount: category === "payout" ? amount : 0,
@@ -807,6 +823,31 @@ function parseRecords(source: SourceImport, rows: RowObject[], headers: string[]
   }
 }
 
+function invoiceSequenceWarnings(records: NormalizedRecord[]): string[] {
+  const groups = new Map<string, number[]>();
+  for (const record of records) {
+    const match = record.reference.trim().match(/^(.*?)(\d+)$/);
+    if (!match) continue;
+    const prefix = match[1];
+    groups.set(prefix, [...(groups.get(prefix) ?? []), Number(match[2])]);
+  }
+  const warnings: string[] = [];
+  for (const [prefix, values] of groups) {
+    const unique = [...new Set(values)].sort((left, right) => left - right);
+    if (unique.length < 3) continue;
+    const present = new Set(unique);
+    const missing: number[] = [];
+    for (let value = unique[0]; value <= unique.at(-1)!; value += 1) {
+      if (!present.has(value)) missing.push(value);
+    }
+    if (missing.length) {
+      const displayed = missing.slice(0, 20).join(", ");
+      warnings.push(`Mögliche Lücken im Rechnungsnummernkreis ${prefix}: ${displayed}${missing.length > 20 ? ` und ${missing.length - 20} weitere` : ""}.`);
+    }
+  }
+  return warnings;
+}
+
 function sourceWarnings(kind: SourceKind, records: NormalizedRecord[], shop?: string): string[] {
   const warnings: string[] = [];
   if (kind === "unknown") warnings.push("Dateistruktur wurde nicht erkannt.");
@@ -823,6 +864,7 @@ function sourceWarnings(kind: SourceKind, records: NormalizedRecord[], shop?: st
   if ((kind.startsWith("etsy") || kind.startsWith("shopify")) && (!shop || normalizeText(shop).includes("bitte zuordnen"))) {
     warnings.push("Shop konnte nicht eindeutig aus dem Dateiinhalt erkannt werden und muss zugeordnet werden.");
   }
+  if (kind === "accountable-invoices") warnings.push(...invoiceSequenceWarnings(records));
   return warnings;
 }
 
@@ -914,10 +956,17 @@ export function applyShopifyAllowList(records: NormalizedRecord[], shop: string,
 
 export function applyGlobalTestIdentities(records: NormalizedRecord[], identities: string[]): NormalizedRecord[] {
   const testNames = new Set(identities.map(normalizeText).filter(Boolean));
+  const ownerIdentityConfigured = [...testNames].some((identity) => {
+    const tokens = identity.split(" ").filter(Boolean);
+    return tokens.includes("horstmann") && (tokens.includes("niklas") || tokens.includes("nik"));
+  });
   return records.map((record) => {
     if (record.sourceKind !== "shopify-orders" || record.amount === 0) return record;
     const customer = normalizeText(record.counterparty);
-    const isKnownTest = testNames.has(customer);
+    const customerTokens = customer.split(" ").filter(Boolean);
+    const isOwner = ownerIdentityConfigured && customerTokens.includes("horstmann")
+      && (customerTokens.includes("niklas") || customerTokens.includes("nik"));
+    const isKnownTest = isOwner || testNames.has(customer);
     if (isKnownTest) {
       return { ...record, disposition: "test", dispositionReason: "Globale Testidentität" };
     }

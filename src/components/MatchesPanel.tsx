@@ -1,6 +1,7 @@
 import { Check, Link2, Sparkles, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { buildSingleReconciliationSummaries } from "../lib/ledger";
+import { reconciliationState } from "../lib/matching";
 import { formatDate, formatMoney } from "../lib/normalize";
 import type { MatchCandidate, MatchLink, NormalizedRecord, RecordReview } from "../types";
 
@@ -9,8 +10,8 @@ interface MatchesPanelProps {
   candidates: MatchCandidate[];
   records: NormalizedRecord[];
   reviews: RecordReview[];
-  onAccept: (candidate: MatchCandidate) => void;
-  onReject: (candidate: MatchCandidate) => void;
+  onAccept: (candidate: MatchCandidate, note: string) => void;
+  onReject: (candidate: MatchCandidate, note: string) => void;
 }
 
 const PAGE_SIZE = 50;
@@ -30,10 +31,12 @@ const BATCH_LINKS = new Set<MatchLink["type"]>(["account-batch", "platform-settl
 export function MatchesPanel({ links, candidates, records, reviews, onAccept, onReject }: MatchesPanelProps) {
   const recordMap = useMemo(() => new Map(records.map((record) => [record.id, record])), [records]);
   const summaries = useMemo(() => buildSingleReconciliationSummaries(records, links, reviews), [records, links, reviews]);
+  const state = useMemo(() => reconciliationState(records, links, reviews), [records, links, reviews]);
   const activeLinks = useMemo(() => links.filter((link) => !link.rejected && !BATCH_LINKS.has(link.type)), [links]);
   const singleCandidates = useMemo(() => candidates.filter((candidate) => !BATCH_LINKS.has(candidate.type)), [candidates]);
   const [candidatePage, setCandidatePage] = useState(0);
   const [linkPage, setLinkPage] = useState(0);
+  const [candidateNotes, setCandidateNotes] = useState<Record<string, string>>({});
   const candidatePages = Math.max(1, Math.ceil(singleCandidates.length / PAGE_SIZE));
   const linkPages = Math.max(1, Math.ceil(activeLinks.length / PAGE_SIZE));
   const safeCandidatePage = Math.min(candidatePage, candidatePages - 1);
@@ -60,8 +63,20 @@ export function MatchesPanel({ links, candidates, records, reviews, onAccept, on
         <div className="panel-heading"><div><span className="panel-kicker">Mehrdeutig</span><h2>{singleCandidates.length.toLocaleString("de-DE")} Vorschläge</h2></div></div>
         <div className="match-list">
           {visibleCandidates.map((candidate) => <article className="match-card candidate-card" key={candidate.id}>
-            <RecordSide record={recordMap.get(candidate.fromId)} /><div className="match-connector"><Sparkles size={18} /><strong>Prüfen</strong><small>{candidate.reason}</small></div><RecordSide record={recordMap.get(candidate.toId)} />
-            <div className="match-actions"><button className="icon-button success" aria-label="Zuordnung bestätigen" onClick={() => onAccept(candidate)}><Check size={18} /></button><button className="icon-button danger" aria-label="Vorschlag ablehnen" onClick={() => onReject(candidate)}><X size={18} /></button></div>
+            <RecordSide record={recordMap.get(candidate.fromId)} /><div className="match-connector"><Sparkles size={18} /><strong>Prüfen</strong><small>{candidate.reason}</small><em>{[candidate.fromId, candidate.toId].filter((id) => state.open.has(id)).length > 0 ? `Kann bis zu ${[candidate.fromId, candidate.toId].filter((id) => state.open.has(id)).length} offene Datensätze klären` : "Ergänzt den Nachweis; Fall kann weiter offen bleiben"}</em></div><RecordSide record={recordMap.get(candidate.toId)} />
+            <div className="candidate-decision">
+              <textarea
+                aria-label="Anmerkung zur vorgeschlagenen Zuordnung"
+                value={candidateNotes[candidate.id] ?? ""}
+                onChange={(event) => setCandidateNotes((current) => ({ ...current, [candidate.id]: event.target.value }))}
+                rows={2}
+                placeholder={candidate.amountDifference > 0.02 ? "Abweichung begründen …" : "Anmerkung (optional)"}
+              />
+              <div className="match-actions">
+                <button className="icon-button success" disabled={candidate.amountDifference > 0.02 && !(candidateNotes[candidate.id] ?? "").trim()} aria-label="Zuordnung bestätigen" onClick={() => onAccept(candidate, (candidateNotes[candidate.id] ?? "").trim())}><Check size={18} /></button>
+                <button className="icon-button danger" aria-label="Vorschlag ablehnen" onClick={() => onReject(candidate, (candidateNotes[candidate.id] ?? "").trim())}><X size={18} /></button>
+              </div>
+            </div>
           </article>)}
         </div>
         <Pagination page={safeCandidatePage} pages={candidatePages} onChange={setCandidatePage} />

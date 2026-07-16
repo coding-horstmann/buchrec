@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { ParsedFileResult, SourceImport } from "../types";
-import { createProject, mergeParsedFiles } from "./project";
+import type { MatchCandidate, MatchLink, ParsedFileResult, SourceImport } from "../types";
+import { canonicalEtsyShop, createProject, filterCandidatesAgainstDecisions, mergeParsedFiles } from "./project";
 
 function parsed(id: string, fileName: string, contentHash: string): ParsedFileResult {
   const source: SourceImport = {
@@ -40,6 +40,32 @@ function parsed(id: string, fileName: string, contentHash: string): ParsedFileRe
 }
 
 describe("project imports", () => {
+  it("keeps Etsy account aliases on their configured canonical shop", () => {
+    const aliases = createProject().settings.etsyShopAliases;
+    expect(canonicalEtsyShop("FantasiasFloralesCo", aliases)).toBe("Frida");
+    expect(canonicalEtsyShop("FormAndFunctionDE", aliases)).toBe("Form");
+  });
+
+  it("removes competing proposals after a manual decision", () => {
+    const candidate = (id: string, fromId: string, toId: string): MatchCandidate => ({
+      id,
+      fromId,
+      toId,
+      type: "document-payment",
+      confidence: 80,
+      amountDifference: 0,
+      rule: "test",
+      reason: "test",
+      automatic: false,
+    });
+    const accepted: MatchLink = { ...candidate("accepted", "doc", "payment-1"), automatic: false };
+    expect(filterCandidatesAgainstDecisions([
+      candidate("same-doc", "doc", "payment-2"),
+      candidate("same-payment", "other-doc", "payment-1"),
+      candidate("free", "free-doc", "payment-3"),
+    ], [accepted]).map((entry) => entry.id)).toEqual(["free"]);
+  });
+
   it("ignores duplicate files by SHA-256 even when their names differ", () => {
     const project = createProject();
     const first = mergeParsedFiles(project, [parsed("source-a", "erst.csv", "same-hash")]);

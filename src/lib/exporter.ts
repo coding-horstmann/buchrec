@@ -1,7 +1,7 @@
 import * as XLSX from "xlsx";
 import { strToU8, zipSync } from "fflate";
 import type { PDFDocument, PDFPage, PDFFont, RGB } from "pdf-lib";
-import type { BuchrecProject, MatchLink, NormalizedRecord, RecordReview } from "../types";
+import type { BuchrecProject, DecisionAudit, MatchLink, NormalizedRecord, RecordReview } from "../types";
 import { buildPlatformReconciliations, buildPlatformSummaries, buildSettlementBatches } from "./ledger";
 import { coverageSummary, effectiveRecordReviews, isReconciliationRecord, reconciliationAxes, reconciliationState } from "./matching";
 import { formatDate, formatMoney } from "./normalize";
@@ -43,6 +43,32 @@ function linkExport(link: MatchLink, records: Map<string, NormalizedRecord>) {
     Regel: link.rule,
     Begründung: link.reason,
     Automatisch: link.automatic ? "Ja" : "Nein",
+    Abgelehnt: link.rejected ? "Ja" : "Nein",
+  };
+}
+
+const DECISION_LABELS: Record<DecisionAudit["kind"], string> = {
+  "record-review": "Bewertung",
+  "link-accepted": "Vorschlag bestätigt",
+  "link-rejected": "Vorschlag abgelehnt",
+  "manual-link": "Manuell verbunden",
+  disposition: "Klassifizierung",
+};
+
+function decisionExport(decision: DecisionAudit, records: Map<string, NormalizedRecord>) {
+  const related = decision.recordIds.map((id) => records.get(id)).filter((record): record is NormalizedRecord => Boolean(record));
+  return {
+    Entscheidungs_ID: decision.id,
+    Zeitpunkt: decision.createdAt,
+    Art: DECISION_LABELS[decision.kind],
+    Status: decision.status ?? "",
+    Anmerkung: decision.note,
+    Match_ID: decision.linkId ?? "",
+    Datensatz_IDs: decision.recordIds.join(" | "),
+    Quellen: related.map((record) => record.sourceFile).join(" | "),
+    Gegenparteien: related.map((record) => record.counterparty).filter(Boolean).join(" | "),
+    Referenzen: related.map((record) => record.reference).filter(Boolean).join(" | "),
+    Beträge: related.map((record) => `${record.amount.toFixed(2)} ${record.currency}`).join(" | "),
   };
 }
 
@@ -161,6 +187,7 @@ function auditWorkbook(project: BuchrecProject): XLSX.WorkBook {
   );
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(project.records.map(recordExport)), "Alle Daten");
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(project.links.map((link) => linkExport(link, recordMap))), "Zuordnungen");
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(project.decisions.map((decision) => decisionExport(decision, recordMap))), "Entscheidungen");
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(statusAxes), "Statusachsen");
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(platformSummaries), "Kontenabgleich");
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(platformControls.flatMap((control) => [
@@ -320,6 +347,7 @@ export async function buildAuditPdf(project: BuchrecProject): Promise<Uint8Array
   const coverage = coverageSummary(project.records, project.links, project.reviews);
   const controls = buildPlatformReconciliations(project.records, project.links, project.settings.year);
   const state = reconciliationState(project.records, project.links, project.reviews);
+  const recordMap = new Map(project.records.map((record) => [record.id, record]));
   const reviewsByRecord = new Map<string, RecordReview[]>();
   for (const review of project.reviews) {
     reviewsByRecord.set(review.recordId, [...(reviewsByRecord.get(review.recordId) ?? []), review]);
@@ -347,15 +375,38 @@ export async function buildAuditPdf(project: BuchrecProject): Promise<Uint8Array
       const current = axis!;
       drawPdfText(
         context,
-        `${current.label}: Soll ${formatMoney(current.expected)} | Ist ${formatMoney(current.actual)} | Differenz ${formatMoney(current.difference)}`,
+        current.mode === "balance"
+          ? `${current.label}: ${formatMoney(current.actual)}`
+          : `${current.label}: Soll ${formatMoney(current.expected)} | Ist ${formatMoney(current.actual)} | Differenz ${formatMoney(current.difference)}`,
         { size: 8.3, color: current.state === "confirmed" ? PDF_GREEN : PDF_WARNING, gap: 2 },
       );
     }
     drawPdfText(
       context,
-      `Käufer ${formatMoney(control.buyerPayments)} - Tax ${formatMoney(control.marketplaceTax)} = Verkäuferumsatz ${formatMoney(control.sellerRevenue)}; Gebühren brutto ${formatMoney(control.feeCharges)}, Gebührenkorrekturen ${formatMoney(-control.feeCorrections)}, Gebühren netto ${formatMoney(control.fees)}, Erstattungen ${formatMoney(control.refunds)}, Anpassungen ${formatMoney(control.adjustments)}, Auszahlungen ${formatMoney(control.payouts)}, Differenz/Übertrag ${formatMoney(control.carry)}.`,
+      `Käufer ${formatMoney(control.buyerPayments)}; Marketplace Tax ${formatMoney(control.marketplaceTax)}; Buyer Fees ${formatMoney(control.buyerFees)}; Verkäuferumsatz ${formatMoney(control.sellerRevenue)}; für Rechnungen relevant ${formatMoney(control.documentRevenue)}; Gebühren brutto ${formatMoney(control.feeCharges)}, Gebührenkorrekturen ${formatMoney(-control.feeCorrections)}, Gebühren netto ${formatMoney(control.fees)}, Erstattungen ${formatMoney(control.refunds)}, Anpassungen ${formatMoney(control.adjustments)}, Auszahlungen ${formatMoney(control.payouts)}, Differenz/Übertrag ${formatMoney(control.carry)}.`,
       { size: 7.8, color: PDF_MUTED, gap: 8 },
     );
+  }
+
+  drawPdfSection(context, `Manuelle Entscheidungen (${project.decisions.length})`);
+  if (!project.decisions.length) {
+    drawPdfText(context, "Keine manuellen Entscheidungen im aktuellen Projektstand.", { size: 8.2, color: PDF_MUTED, gap: 5 });
+  }
+  for (const decision of [...project.decisions].sort((left, right) => left.createdAt.localeCompare(right.createdAt))) {
+    const related = decision.recordIds
+      .map((id) => recordMap.get(id))
+      .filter((record): record is NormalizedRecord => Boolean(record));
+    const contextText = related
+      .map((record) => `${record.counterparty || record.description} (${record.reference || record.sourceFile}, ${formatMoney(record.amount, record.currency)})`)
+      .join(" <-> ");
+    ensurePdfSpace(context, 48);
+    drawPdfText(
+      context,
+      `${new Date(decision.createdAt).toLocaleString("de-DE")} | ${DECISION_LABELS[decision.kind]}${decision.status ? ` | ${decision.status}` : ""}`,
+      { size: 8.2, bold: true, gap: 1 },
+    );
+    if (contextText) drawPdfText(context, contextText, { size: 7.5, color: PDF_MUTED, gap: 1 });
+    drawPdfText(context, decision.note, { size: 7.8, gap: 5 });
   }
 
   const flaggedIds = new Set(
@@ -437,6 +488,7 @@ export async function buildAuditPackage(project: BuchrecProject): Promise<Uint8A
     platformSummaries: summaries,
     platformControls,
     batches,
+    decisions: project.decisions,
     project,
   };
   const readme = [

@@ -17,6 +17,7 @@ interface PeriodAccumulator {
   inflows: number;
   sellerRevenue: number;
   marketplaceTax: number;
+  buyerFees: number;
   fees: number;
   refunds: number;
   charges: number;
@@ -62,6 +63,7 @@ function createAccumulator(
     inflows: 0,
     sellerRevenue: 0,
     marketplaceTax: 0,
+    buyerFees: 0,
     fees: 0,
     refunds: 0,
     charges: 0,
@@ -111,11 +113,14 @@ function addEtsy(acc: PeriodAccumulator, record: NormalizedRecord): void {
   if (record.category === "sale") acc.inflows = roundMoney(acc.inflows + record.amount);
   if (record.category === "refund") acc.refunds = roundMoney(acc.refunds + record.amount);
   if (record.category === "payout") acc.payouts = roundMoney(acc.payouts + record.amount);
+  if (record.category === "buyer-fee") {
+    acc.buyerFees = roundMoney(acc.buyerFees + (record.direction === "in" ? -record.amount : record.amount));
+  }
   if (record.category === "fee") {
     if (record.metadata.marketplaceTax === true || normalizeText(record.description).includes("sales tax paid by buyer")) {
-      acc.marketplaceTax = roundMoney(acc.marketplaceTax + record.amount);
+      acc.marketplaceTax = roundMoney(acc.marketplaceTax + (record.direction === "in" ? -record.amount : record.amount));
     } else {
-      acc.fees = roundMoney(acc.fees + record.amount);
+      acc.fees = roundMoney(acc.fees + (record.direction === "in" ? -record.amount : record.amount));
     }
   }
   const contribution = record.category === "payout"
@@ -190,7 +195,7 @@ function paypalBalances(rows: NormalizedRecord[]): {
 function finalize(acc: PeriodAccumulator): PlatformPeriodSummary {
   const balances = acc.kind === "paypal" ? paypalBalances(acc.paypalRows) : {};
   const sellerRevenue = acc.kind === "etsy"
-    ? roundMoney(acc.inflows - acc.marketplaceTax)
+    ? roundMoney(acc.inflows - acc.marketplaceTax - acc.buyerFees)
     : acc.sellerRevenue;
   const carry = acc.kind === "paypal"
     ? balances.reported ?? acc.movement
@@ -211,6 +216,7 @@ function finalize(acc: PeriodAccumulator): PlatformPeriodSummary {
     inflows: acc.inflows,
     sellerRevenue,
     marketplaceTax: acc.marketplaceTax,
+    buyerFees: acc.buyerFees,
     fees: acc.fees,
     refunds: acc.refunds,
     charges: acc.charges,
@@ -339,6 +345,19 @@ function controlAxis(
   };
 }
 
+function balanceAxis(label: string, amount: number, detail: string) {
+  const value = roundMoney(amount);
+  return {
+    label,
+    expected: value,
+    actual: value,
+    difference: 0,
+    state: "confirmed" as const,
+    detail,
+    mode: "balance" as const,
+  };
+}
+
 function platformBankTotal(
   payouts: NormalizedRecord[],
   records: NormalizedRecord[],
@@ -388,6 +407,17 @@ export function buildPlatformReconciliations(
       record.date?.startsWith(`${year}-`),
   );
   const adjacency = linkAdjacency(links);
+  const activeRecordMap = new Map(activeRecords.map((record) => [record.id, record]));
+  const businessAdjacency = linkAdjacency(
+    links.filter((link) => {
+      if (["document-order", "platform-evidence", "manual"].includes(link.type)) return true;
+      if (link.type !== "group-payment") return false;
+      const from = activeRecordMap.get(link.fromId);
+      const to = activeRecordMap.get(link.toId);
+      return [from, to].some((record) => record?.category === "document-income") &&
+        [from, to].some((record) => record && ["order", "order-detail", "sale", "refund"].includes(record.category));
+    }),
+  );
   const summaries = buildPlatformSummaries(records, links, year);
   const result: PlatformReconciliation[] = [];
 
@@ -397,48 +427,75 @@ export function buildPlatformReconciliations(
       .map((record) => record.shop!),
   );
   for (const shop of etsyShops) {
-    const orders = activeRecords.filter(
+    const allOrders = activeRecords.filter(
       (record) => record.sourceKind === "etsy-sales" && record.category === "order" && normalizeText(record.shop) === normalizeText(shop),
-    );
-    const sellerRevenue = roundMoney(orders.reduce((sum, record) => sum + record.amount, 0));
-    const buyerPayments = roundMoney(orders.reduce((sum, record) => {
-      const listing = Number(record.metadata.listingAmount);
-      return sum + (Number.isFinite(listing) ? listing : record.amount);
-    }, 0));
-    const marketplaceTax = roundMoney(buyerPayments - sellerRevenue);
-    const statement = summaries.find(
-      (summary) => summary.account === `Etsy · ${shop}` && summary.period === String(year) && summary.currency === "EUR",
     );
     const platformRecords = activeRecords.filter(
       (record) => record.sourceKind.startsWith("etsy") && normalizeText(record.shop) === normalizeText(shop),
     );
-    const salesDocuments = connectedDocuments(platformRecords, activeRecords, adjacency, "document-income");
+    const detailsByOrder = new Map(
+      platformRecords
+        .filter((record) => record.sourceKind === "etsy-sold-orders" && record.category === "order-detail")
+        .map((record) => [record.reference, record]),
+    );
+    const buyerFeesByOrder = new Map<string, number>();
+    for (const record of platformRecords.filter((entry) => entry.category === "buyer-fee")) {
+      const signed = record.direction === "in" ? -record.amount : record.amount;
+      buyerFeesByOrder.set(record.reference, roundMoney((buyerFeesByOrder.get(record.reference) ?? 0) + signed));
+    }
+    const invoiceOrders = allOrders.filter((record) => record.metadata.fullyRefunded !== true);
+    const documentRevenue = roundMoney(invoiceOrders.reduce((sum, record) => {
+      const detail = detailsByOrder.get(record.reference);
+      const buyerFee = buyerFeesByOrder.get(record.reference) ?? 0;
+      return sum + (detail?.amount ?? roundMoney(record.amount - buyerFee));
+    }, 0));
+    const buyerPayments = roundMoney(allOrders.reduce((sum, record) => {
+      const listing = Number(record.metadata.listingAmount);
+      return sum + (Number.isFinite(listing) ? listing : record.amount);
+    }, 0));
+    const statement = summaries.find(
+      (summary) => summary.account === `Etsy · ${shop}` && summary.period === String(year) && summary.currency === "EUR",
+    );
+    const sellerRevenue = statement?.sellerRevenue ?? roundMoney(allOrders.reduce((sum, record) => sum + record.amount, 0));
+    const marketplaceTax = statement?.marketplaceTax ?? roundMoney(buyerPayments - sellerRevenue);
+    const buyerFees = statement?.buyerFees ?? roundMoney([...buyerFeesByOrder.values()].reduce((sum, amount) => sum + amount, 0));
+    const salesDocuments = connectedDocuments(platformRecords, activeRecords, businessAdjacency, "document-income");
     const feeDocuments = connectedDocuments(platformRecords, activeRecords, adjacency, "document-expense");
     const accountableSales = roundMoney(salesDocuments.reduce((sum, record) => sum + signedDocument(record), 0));
     const accountableFees = roundMoney(feeDocuments.reduce((sum, record) => sum + record.amount, 0));
-    const fees = statement?.fees ?? 0;
+    const feeRows = platformRecords.filter(
+      (record) => record.sourceKind === "etsy-statement" && record.category === "fee" && record.metadata.marketplaceTax !== true,
+    );
+    const feeCharges = roundMoney(feeRows.filter((record) => record.direction === "out").reduce((sum, record) => sum + record.amount, 0));
+    const feeCorrections = roundMoney(feeRows.filter((record) => record.direction === "in").reduce((sum, record) => sum + record.amount, 0));
+    const fees = roundMoney(feeCharges - feeCorrections);
     const refunds = statement?.refunds ?? 0;
     const payouts = statement?.payouts ?? 0;
     const carry = statement?.carry ?? 0;
     const adjustments = roundMoney(carry - (sellerRevenue - fees - refunds - payouts));
-    const payoutRecords = platformRecords.filter((record) => record.category === "payout");
-    const bankTotal = platformBankTotal(payoutRecords, activeRecords, adjacency);
+    const transferPayouts = platformRecords.filter((record) => record.sourceKind === "etsy-transfers" && record.category === "payout");
+    const statementPayouts = platformRecords.filter((record) => record.sourceKind === "etsy-statement" && record.category === "payout");
+    const bankPayoutRecords = transferPayouts.length ? transferPayouts : statementPayouts;
+    const executedPayouts = roundMoney(bankPayoutRecords.reduce((sum, record) => sum + record.amount, 0));
+    const bankTotal = platformBankTotal(bankPayoutRecords, activeRecords, adjacency);
     result.push({
       id: makeId("platform-control", "etsy", shop, year),
       platform: "Etsy",
       shop,
       period: String(year),
       currency: "EUR",
-      documentAxis: controlAxis("Accountable ↔ Etsy-Verkäufe", sellerRevenue, accountableSales, "Verkäuferumsatz gegen Ausgangsrechnungen"),
-      feeDocumentAxis: controlAxis("Accountable ↔ Etsy-Gebühren", fees, accountableFees, "Etsy-Gebühren gegen Eingangsrechnungen"),
-      platformAxis: controlAxis("Etsy-Zahlungskonto", 0, carry, "Rechnerischer Periodenübertrag; Jahresrand kann den Betrag erklären", true),
-      paymentAxis: controlAxis("Etsy-Auszahlungen ↔ Bank", payouts, bankTotal, "Auszahlungen bis FYRST/N26 verfolgt"),
+      documentAxis: controlAxis("Accountable-Rechnungen ↔ Etsy-Verkäufe-CSV", documentRevenue, accountableSales, "Rechnungsrelevanter Verkäuferumsatz ohne Marketplace Tax, Buyer Fees und vollständig erstattete Bestellungen"),
+      feeDocumentAxis: controlAxis("Accountable-Eingangsrechnungen ↔ Etsy-Monatsabrechnungen", fees, accountableFees, "Etsy-Gebühren abzüglich Gutschriften; Marketplace Tax und Buyer Fees sind ausgeschlossen"),
+      platformAxis: balanceAxis("Etsy-Zahlungskonto · Übertrag", carry, "Fortgeschriebene Periodenbewegung; kein Soll-Null und kein automatischer Fehler"),
+      paymentAxis: controlAxis("Etsy-Auszahlungs-CSV ↔ FYRST/N26", executedPayouts, bankTotal, "Nur als ausgeführt gekennzeichnete Etsy-Auszahlungen; zurückgegebene Auszahlungen sind ausgeschlossen"),
       sellerRevenue,
+      documentRevenue,
       buyerPayments,
       marketplaceTax,
-      feeCharges: fees,
+      buyerFees,
+      feeCharges,
       fees,
-      feeCorrections: 0,
+      feeCorrections,
       refunds,
       adjustments,
       payouts,
@@ -471,6 +528,22 @@ export function buildPlatformReconciliations(
       return sum;
     }, 0));
     const fees = roundMoney(grossFees - feeCorrections);
+    const netBasisMonths = new Set(
+      links
+        .filter((link) => link.rule.startsWith("platform-withheld-fees-net"))
+        .flatMap((link) => [activeRecordMap.get(link.fromId), activeRecordMap.get(link.toId)])
+        .filter((record): record is NormalizedRecord => record?.sourceKind === "ebay-ledger" && Boolean(record.date))
+        .map((record) => record.date!.slice(0, 7)),
+    );
+    const correctionsIncludedOnInvoices = roundMoney(ebay.reduce((sum, record) => {
+      if (!record.date || !netBasisMonths.has(record.date.slice(0, 7))) return sum;
+      if ((record.category === "sale" || record.category === "refund") && (record.feeAmount ?? 0) < 0) {
+        return sum + Math.abs(record.feeAmount ?? 0);
+      }
+      if (record.category === "fee" && record.direction === "in") return sum + record.amount;
+      return sum;
+    }, 0));
+    const invoiceFeeExpected = roundMoney(grossFees - correctionsIncludedOnInvoices);
     const payoutTotal = roundMoney(payouts.reduce((sum, record) => sum + record.amount, 0));
     const platformRecords = activeRecords.filter(
       (record) => record.sourceKind === "ebay-ledger" || record.sourceKind === "ebay-orders",
@@ -498,12 +571,14 @@ export function buildPlatformReconciliations(
       period: String(year),
       currency: "EUR",
       documentAxis: controlAxis("Accountable ↔ eBay-Verkäufe", sellerRevenue, accountableSales, "Verkäufe abzüglich Erstattungen gegen Ausgangsrechnungen"),
-      feeDocumentAxis: controlAxis("Accountable ↔ eBay-Gebühren", fees, accountableFees, "Nettogebühren gegen Eingangsrechnungen; Bruttobelastungen und Korrekturen bleiben separat sichtbar"),
-      platformAxis: controlAxis("eBay-Zahlungskonto", 0, carry, "Verkäufe minus Erstattungen, Gebühren und Auszahlungen", true),
+      feeDocumentAxis: controlAxis("Accountable-Eingangsrechnungen ↔ eBay-Gebührenabrechnung", invoiceFeeExpected, accountableFees, "Je Abrechnungsmonat wird die ausgewiesene Brutto- oder Nettogebühr verwendet; Korrekturen bleiben separat sichtbar"),
+      platformAxis: balanceAxis("eBay-Zahlungskonto · Übertrag", carry, "Fortgeschriebene Verkäufe, Erstattungen, Gebühren und Auszahlungen; kein Soll-Null"),
       paymentAxis: controlAxis("eBay-Auszahlungen/Belastungen ↔ Bank", expectedBank, bankTotal, "Auszahlungen und Rückerstattungszuführungen bis FYRST/N26 verfolgt"),
       sellerRevenue,
+      documentRevenue: sellerRevenue,
       buyerPayments: roundMoney(sales.reduce((sum, record) => sum + record.amount, 0)),
       marketplaceTax: 0,
+      buyerFees: 0,
       feeCharges: grossFees,
       fees,
       feeCorrections,

@@ -72,6 +72,29 @@ describe("file importer", () => {
     expect(applyGlobalTestIdentities(classified, [])[0]).toMatchObject({ disposition: "active", dispositionReason: undefined });
   });
 
+  it("recognizes the owner even when additional given names are present", async () => {
+    const shopify = csvFile(
+      "shop.csv",
+      "Name,Financial Status,Paid at,Currency,Total,Created at,Billing Name,Shipping Name,Payment Method,Payment Reference,Vendor\n#1,paid,2025-05-02,EUR,67.43,2025-05-02,Niklas Maximilian Heinrich Horstmann,Niklas Maximilian Heinrich Horstmann,PayPal,P-1,Shop",
+    );
+    const fyrst = csvFile(
+      "fyrst.csv",
+      [
+        "Buchungstag;Wert;Umsatzart;Begünstigter / Auftraggeber;Verwendungszweck;IBAN / Kontonummer;Betrag;Soll;Haben;Währung",
+        "23.06.2025;23.06.2025;SEPA Überweisung;Niklas Maximilian Heinrich Horstmann;Privat;;-15;15;;EUR",
+      ].join("\n"),
+    );
+    const [shopifyResult, fyrstResult] = await Promise.all([parseImportFile(shopify), parseImportFile(fyrst)]);
+    expect(applyGlobalTestIdentities(shopifyResult.records, ["Niklas Horstmann"])[0]).toMatchObject({
+      disposition: "test",
+      dispositionReason: "Globale Testidentität",
+    });
+    expect(fyrstResult.records[0]).toMatchObject({
+      disposition: "private",
+      dispositionReason: "Privatentnahme des Inhabers",
+    });
+  });
+
   it("imports both relevant Accountable sheets", async () => {
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(
@@ -98,6 +121,24 @@ describe("file importer", () => {
     expect(result.records.map((record) => record.category)).toEqual(["tax-payment", "document-income"]);
     expect(result.records[1]).toMatchObject({ reference: "R-1", amount: 50 });
     expect(result.records[1].metadata.lineCount).toBe(2);
+  });
+
+  it("warns when an Accountable invoice number is missing from the export", async () => {
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(
+      workbook,
+      XLSX.utils.aoa_to_sheet([
+        ["Einkommenszahl", "Rechnung Type", "Status", "Rechnungsdatum", "Kundenname", "Gesamtbetrag", "Währung"],
+        ["1906-2025-14", "invoice", "Bezahlt", "03.02.2025", "Iris", 28.34, "EUR"],
+        ["1906-2025-15", "invoice", "Bezahlt", "03.02.2025", "Astrid", 26.86, "EUR"],
+        ["1906-2025-17", "invoice", "Bezahlt", "06.02.2025", "Printler", 1260.39, "EUR"],
+        ["1906-2025-18", "invoice", "Bezahlt", "06.02.2025", "Pierre", 29.62, "EUR"],
+      ]),
+      "Rechnungen",
+    );
+    const bytes = XLSX.write(workbook, { type: "array", bookType: "xlsx" });
+    const result = await parseImportFile(new File([bytes], "accountable.xlsx"));
+    expect(result.sources[0].warnings).toContain("Mögliche Lücken im Rechnungsnummernkreis 1906-2025-: 16.");
   });
 
   it("uses source-specific Etsy and eBay date formats", async () => {
@@ -140,6 +181,53 @@ describe("file importer", () => {
       feeAmount: 3.53,
     });
     expect(result.records[0].metadata.marketplaceTax).toBe(6.81);
+  });
+
+  it("recognizes fully refunded Etsy orders from the sales export", async () => {
+    const file = csvFile(
+      "Etsy Payments-Verkäufe Frida 25.csv",
+      [
+        "Payment ID,Buyer Username,Buyer Name,Order ID,Gross Amount,Fees,Net Amount,Adjusted Gross,Adjusted Fees,Adjusted Net,Currency,Listing Amount,Listing Currency,VAT Amount,Status,Order Date,Buyer,Refund Amount",
+        "P-1,user,Irene,3729984516,32.23,1.72,30.51,0,0,0,EUR,35.45,EUR,0,SETTLED,07/08/2025,Irene Kay,35.45",
+      ].join("\n"),
+    );
+    const result = await parseImportFile(file);
+    expect(result.records[0]).toMatchObject({
+      disposition: "resolved",
+      dispositionReason: "Vollständig über Etsy erstattet; keine Ausgangsrechnung erwartet",
+    });
+    expect(result.records[0].metadata).toMatchObject({ refundAmount: 35.45, fullyRefunded: true });
+  });
+
+  it("imports Etsy Buyer Fees and fee credits with their economic sign", async () => {
+    const file = csvFile(
+      "etsy_statement_2025_7 frida.csv",
+      [
+        "Datum,Art,Titel,Info,Währung,Betrag,Gebühren & Steuern,Netto,Steuerliche Angaben",
+        "15. July 2025,Buyer Fee,Colorado Retail Delivery Fee (paid by buyer),Order #3743707041,EUR,--,-€0.23,-€0.23,--",
+        "10. July 2025,Fee,Credit for processing fee,Order #3729984516,EUR,--,€1.72,€1.72,--",
+        "10. July 2025,Tax,Refund to buyer for sales tax,Order #3729984516,EUR,--,€3.22,€3.22,--",
+      ].join("\n"),
+    );
+    const result = await parseImportFile(file);
+    expect(result.records).toEqual(expect.arrayContaining([
+      expect.objectContaining({ category: "buyer-fee", direction: "out", amount: 0.23 }),
+      expect.objectContaining({ category: "fee", direction: "in", amount: 1.72 }),
+      expect.objectContaining({ category: "fee", direction: "in", amount: 3.22, metadata: expect.objectContaining({ marketplaceTax: true }) }),
+    ]));
+  });
+
+  it("maps the known Etsy account aliases to their canonical shops", async () => {
+    const base = [
+      "Payment ID,Buyer Username,Buyer Name,Order ID,Gross Amount,Fees,Net Amount,Currency,Listing Amount,Listing Currency,VAT Amount,Status,Order Date,Buyer,Refund Amount",
+      "P-1,user,First,1234567890,32.55,1.72,30.83,EUR,35.58,EUR,0,SETTLED,02/01/2025,Full Buyer,0",
+    ].join("\n");
+    const [frida, form] = await Promise.all([
+      parseImportFile(csvFile("FantasiasFloralesCo payments.csv", base)),
+      parseImportFile(csvFile("FormAndFunctionDE payments.csv", base)),
+    ]);
+    expect(frida.sources[0].shop).toBe("Frida");
+    expect(form.sources[0].shop).toBe("Form");
   });
 
   it("keeps Gelato refunds and PayPal balances as account movements", async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { NormalizedRecord } from "../types";
+import type { MatchLink, NormalizedRecord } from "../types";
 import { coverageSummary, reconciliationAxes, runMatching } from "./matching";
 
 function record(overrides: Partial<NormalizedRecord> & Pick<NormalizedRecord, "id" | "category" | "direction" | "amount">): NormalizedRecord {
@@ -232,6 +232,48 @@ describe("matching", () => {
     expect(coverageSummary(records, result.links).documents.open).toBe(0);
   });
 
+  it("assigns repeated Printful amounts globally across the year", () => {
+    const dates = [
+      ["2025-05-21", "2025-04-23"],
+      ["2025-08-06", "2025-07-29"],
+      ["2025-09-20", "2025-09-14"],
+      ["2025-10-21", "2025-10-14"],
+      ["2025-11-22", "2025-10-25"],
+      ["2025-11-24", "2025-11-14"],
+    ];
+    const records = dates.flatMap(([documentDate, chargeDate], index) => [
+      record({ id: `printful-doc-${index}`, sourceKind: "accountable-expenses", category: "document-expense", direction: "out", date: documentDate, amount: 21.94, counterparty: "Printful" }),
+      record({ id: `printful-order-${index}`, sourceKind: "printful-orders", category: "wallet-charge", direction: "out", date: chargeDate, amount: 21.94, counterparty: "Printful", reference: `PF-${index}` }),
+    ]);
+    const links = runMatching(records).links.filter((link) => link.rule === "provider-document-global-assignment");
+    expect(links).toHaveLength(6);
+    expect(new Set(links.map((link) => link.fromId)).size).toBe(6);
+    expect(new Set(links.map((link) => link.toId)).size).toBe(6);
+  });
+
+  it("matches several IONOS documents to one PayPal payment", () => {
+    const records = [
+      record({ id: "ionos-doc-1", sourceKind: "accountable-expenses", category: "document-expense", direction: "out", date: "2025-06-17", amount: 6, counterparty: "1&1 Ionos Se" }),
+      record({ id: "ionos-doc-2", sourceKind: "accountable-expenses", category: "document-expense", direction: "out", date: "2025-06-17", amount: 1.5, counterparty: "1&1 Ionos Se" }),
+      record({ id: "ionos-paypal", sourceKind: "paypal-business", category: "cash-movement", direction: "out", date: "2025-06-23", amount: 7.5, counterparty: "1&1 IONOS SE", metadata: { net: -7.5, balance: 0, time: "12:00:00" } }),
+    ];
+    const result = runMatching(records);
+    expect(result.links.filter((link) => link.rule === "multiple-documents-single-payment")).toHaveLength(2);
+    expect(coverageSummary(records, result.links).documents.open).toBe(0);
+  });
+
+  it("matches an eBay gross fee invoice while keeping corrections separate", () => {
+    const records = [
+      record({ id: "ebay-fee-doc", sourceKind: "accountable-expenses", category: "document-expense", direction: "out", date: "2025-10-31", amount: 17, counterparty: "Ebay GmbH" }),
+      record({ id: "ebay-sale", sourceKind: "ebay-ledger", category: "sale", direction: "in", date: "2025-10-10", amount: 100, feeAmount: 15 }),
+      record({ id: "ebay-fee", sourceKind: "ebay-ledger", category: "fee", direction: "out", date: "2025-10-11", amount: 2 }),
+      record({ id: "ebay-credit", sourceKind: "ebay-ledger", category: "fee", direction: "in", date: "2025-10-12", amount: 4.72 }),
+    ];
+    const links = runMatching(records).links.filter((link) => link.rule === "platform-withheld-fees-gross");
+    expect(links).toHaveLength(2);
+    expect(links.some((link) => link.toId === "ebay-credit")).toBe(false);
+  });
+
   it("assigns repeated PayPal and bank amounts globally one to one", () => {
     const records = [
       record({ id: "paypal-1", sourceKind: "paypal-business", category: "cash-movement", direction: "out", date: "2025-12-15", amount: 83.49, counterparty: "Gelato ASA" }),
@@ -269,6 +311,50 @@ describe("matching", () => {
     expect(result.reviews).toEqual([
       expect.objectContaining({ recordId: "sheryl-doc", status: "warning" }),
     ]);
+  });
+
+  it("uses Etsy Sold Orders and excludes the Colorado buyer fee from invoice revenue", () => {
+    const records = [
+      record({ id: "teresa-doc", sourceKind: "accountable-invoices", category: "document-income", direction: "in", date: "2025-07-16", amount: 23.85, counterparty: "Teresa Cole" }),
+      record({ id: "teresa-order", sourceKind: "etsy-sales", category: "order", direction: "in", date: "2025-07-15", amount: 24.08, counterparty: "Teresa Cole", reference: "3743707041", shop: "Frida", metadata: { listingAmount: 26.04 } }),
+      record({ id: "teresa-detail", sourceKind: "etsy-sold-orders", category: "order-detail", direction: "in", date: "2025-07-15", amount: 23.85, counterparty: "Teresa Cole", reference: "3743707041", shop: "Frida" }),
+      record({ id: "teresa-buyer-fee", sourceKind: "etsy-statement", category: "buyer-fee", direction: "out", date: "2025-07-15", amount: 0.23, reference: "3743707041", shop: "Frida" }),
+    ];
+    const result = runMatching(records);
+    expect(result.links).toEqual(expect.arrayContaining([
+      expect.objectContaining({ fromId: "teresa-doc", toId: "teresa-order", rule: "etsy-related-party-exact" }),
+    ]));
+    expect(result.reviews).toHaveLength(0);
+  });
+
+  it("does not let one document resolve unrelated orders in the same payout component", () => {
+    const records = [
+      record({ id: "doc-a", sourceKind: "accountable-invoices", category: "document-income", direction: "in", amount: 20 }),
+      record({ id: "order-a", sourceKind: "etsy-sales", category: "order", direction: "in", amount: 20 }),
+      record({ id: "order-b", sourceKind: "etsy-sales", category: "order", direction: "in", amount: 30 }),
+      record({ id: "payout", sourceKind: "etsy-statement", category: "payout", direction: "in", amount: 50 }),
+    ];
+    const links: MatchLink[] = [
+      { id: "doc-order", fromId: "doc-a", toId: "order-a", type: "document-order", confidence: 100, amountDifference: 0, rule: "test", reason: "test", automatic: true },
+      { id: "order-a-payout", fromId: "order-a", toId: "payout", type: "platform-settlement", confidence: 100, amountDifference: 0, rule: "test", reason: "test", automatic: true },
+      { id: "order-b-payout", fromId: "order-b", toId: "payout", type: "platform-settlement", confidence: 100, amountDifference: 0, rule: "test", reason: "test", automatic: true },
+    ];
+    expect(reconciliationAxes(records, links).get("order-a")?.businessEvidence).toBe("confirmed");
+    expect(reconciliationAxes(records, links).get("order-b")?.businessEvidence).toBe("open");
+  });
+
+  it("warns when a fully refunded Etsy order has an invoice but no credit note", () => {
+    const records = [
+      record({ id: "valerie-doc", sourceKind: "accountable-invoices", category: "document-income", direction: "in", date: "2025-03-28", amount: 21.2, counterparty: "DOSSOU Valérie" }),
+      record({ id: "valerie-order", sourceKind: "etsy-sales", category: "order", direction: "in", date: "2025-03-24", amount: 21.2, counterparty: "DOSSOU Valérie", reference: "3637984203", shop: "Frida", disposition: "resolved", metadata: { fullyRefunded: true, refundAmount: 21.2 } }),
+    ];
+    expect(runMatching(records).reviews).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        recordId: "valerie-doc",
+        status: "warning",
+        note: expect.stringContaining("keine passende Stornorechnung"),
+      }),
+    ]));
   });
 
   it("keeps an identified zero-value Etsy invoice as a data error", () => {

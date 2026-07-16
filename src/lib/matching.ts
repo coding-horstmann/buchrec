@@ -18,6 +18,7 @@ const PAYMENT_EVIDENCE_CATEGORIES = new Set<RecordCategory>([
   "transfer",
   "wallet-charge",
   "wallet-funding",
+  "buyer-fee",
   "fee",
   "refund",
 ]);
@@ -223,7 +224,11 @@ function etsyDocumentReviewLinks(records: NormalizedRecord[]): {
     (record) => active(record) && record.category === "document-income",
   );
   const orders = records.filter(
-    (record) => active(record) && record.sourceKind === "etsy-sales" && record.category === "order",
+    (record) =>
+      active(record) &&
+      record.sourceKind === "etsy-sales" &&
+      record.category === "order" &&
+      record.metadata.fullyRefunded !== true,
   );
   const detailsByOrder = new Map<string, NormalizedRecord[]>();
   for (const detail of records.filter(
@@ -231,6 +236,14 @@ function etsyDocumentReviewLinks(records: NormalizedRecord[]): {
   )) {
     const key = `${normalizeText(detail.shop)}|${detail.reference}`;
     detailsByOrder.set(key, [...(detailsByOrder.get(key) ?? []), detail]);
+  }
+  const buyerFeesByOrder = new Map<string, number>();
+  for (const buyerFee of records.filter(
+    (record) => active(record) && record.sourceKind === "etsy-statement" && record.category === "buyer-fee",
+  )) {
+    const key = `${normalizeText(buyerFee.shop)}|${buyerFee.reference}`;
+    const signed = buyerFee.direction === "in" ? -buyerFee.amount : buyerFee.amount;
+    buyerFeesByOrder.set(key, roundMoney((buyerFeesByOrder.get(key) ?? 0) + signed));
   }
 
   const links: MatchLink[] = [];
@@ -246,17 +259,22 @@ function etsyDocumentReviewLinks(records: NormalizedRecord[]): {
         );
         const days = reconciliationDateDifference(document, order);
         const listingAmount = Number(order.metadata.listingAmount);
-        const sellerAmount = order.amount;
+        const buyerFee = buyerFeesByOrder.get(`${normalizeText(order.shop)}|${order.reference}`) ?? 0;
+        const detailedSellerAmount = details.length === 1 ? details[0].amount : undefined;
+        const sellerAmount = detailedSellerAmount ?? roundMoney(order.amount - buyerFee);
         const sellerMatch = Math.abs(document.amount - sellerAmount) <= 0.02;
+        const buyerFeeMatch = buyerFee > 0.02 && Math.abs(document.amount - order.amount) <= 0.02;
         const buyerTotalMatch = Number.isFinite(listingAmount) && Math.abs(document.amount - listingAmount) <= 0.02;
         const zeroInvoice = document.amount === 0 && sellerAmount > 0;
-        if (similarity < 1 || (days !== undefined && days > 20) || (!sellerMatch && !buyerTotalMatch && !zeroInvoice)) return undefined;
+        if (similarity < 1 || (days !== undefined && days > 20) || (!sellerMatch && !buyerFeeMatch && !buyerTotalMatch && !zeroInvoice)) return undefined;
         return {
           order,
           days: days ?? 0,
           listingAmount,
           sellerAmount,
           sellerMatch,
+          buyerFee,
+          buyerFeeMatch,
           buyerTotalMatch,
           zeroInvoice,
         };
@@ -266,7 +284,7 @@ function etsyDocumentReviewLinks(records: NormalizedRecord[]): {
     if (possible.length !== 1 || usedOrders.has(possible[0].order.id)) continue;
     const match = possible[0];
     usedOrders.add(match.order.id);
-    const taxDifference = roundMoney(match.listingAmount - match.sellerAmount);
+    const taxDifference = roundMoney(match.listingAmount - match.sellerAmount - match.buyerFee);
 
     if (match.zeroInvoice) {
       links.push(makeLink(
@@ -284,20 +302,36 @@ function etsyDocumentReviewLinks(records: NormalizedRecord[]): {
         `Accountable enthält 0,00 EUR, Etsy weist für Bestellung ${match.order.reference} ${match.sellerAmount.toFixed(2)} EUR Verkäuferumsatz aus.`,
         "etsy-zero-invoice",
       ));
-    } else if (match.buyerTotalMatch && taxDifference > 0.02) {
+    } else if (match.buyerFeeMatch) {
+      links.push(makeLink(
+        document,
+        match.order,
+        "document-order",
+        100,
+        "etsy-buyer-fee-warning",
+        `Beleg enthält ${match.buyerFee.toFixed(2)} EUR von Etsy erhobene Buyer Fee`,
+        true,
+      ));
+      reviews.push(makeReview(
+        document,
+        "warning",
+        `Zugeordnet mit Warnung: Der Accountable-Beleg enthält ${match.buyerFee.toFixed(2)} EUR von Etsy erhobene Buyer Fee.`,
+        "etsy-buyer-fee-invoice",
+      ));
+    } else if (match.buyerTotalMatch && taxDifference + match.buyerFee > 0.02) {
       links.push(makeLink(
         document,
         match.order,
         "document-order",
         100,
         "etsy-buyer-total-sales-tax-warning",
-        `Beleg entspricht Käufergesamtbetrag; ${taxDifference.toFixed(2)} EUR Marketplace Sales Tax sind nicht Verkäuferumsatz`,
+        `Beleg entspricht Käufergesamtbetrag; ${taxDifference.toFixed(2)} EUR Marketplace Sales Tax und ${match.buyerFee.toFixed(2)} EUR Buyer Fees sind nicht Verkäuferumsatz`,
         true,
       ));
       reviews.push(makeReview(
         document,
         "warning",
-        `Zugeordnet mit Warnung: Der Accountable-Beleg enthält ${taxDifference.toFixed(2)} EUR von Etsy abgeführte Marketplace Sales Tax.`,
+        `Zugeordnet mit Warnung: Der Accountable-Beleg enthält ${taxDifference.toFixed(2)} EUR Marketplace Sales Tax und ${match.buyerFee.toFixed(2)} EUR Buyer Fees.`,
         "etsy-sales-tax-invoice",
       ));
     } else {
@@ -313,6 +347,48 @@ function etsyDocumentReviewLinks(records: NormalizedRecord[]): {
     }
   }
   return { links, reviews };
+}
+
+function fullyRefundedEtsyInvoiceReviews(records: NormalizedRecord[]): RecordReview[] {
+  const refundedOrders = records.filter(
+    (record) =>
+      active(record) &&
+      record.sourceKind === "etsy-sales" &&
+      record.category === "order" &&
+      record.metadata.fullyRefunded === true,
+  );
+  const invoices = records.filter(
+    (record) => active(record) && record.category === "document-income" && record.direction === "in",
+  );
+  const creditNotes = records.filter(
+    (record) => active(record) && record.category === "document-income" && record.direction === "out",
+  );
+  const reviews: RecordReview[] = [];
+  for (const order of refundedOrders) {
+    const matchingInvoices = invoices.filter((document) => {
+      const days = reconciliationDateDifference(document, order);
+      return counterpartySimilarity(document, order) >= 1 &&
+        closestAmountDifference(document, order) <= 0.02 &&
+        (days === undefined || days <= 90);
+    });
+    if (matchingInvoices.length !== 1) continue;
+    const invoice = matchingInvoices[0];
+    const hasCreditNote = creditNotes.some((creditNote) => {
+      const days = reconciliationDateDifference(invoice, creditNote);
+      return counterpartySimilarity(invoice, creditNote) >= 1 &&
+        closestAmountDifference(invoice, creditNote) <= 0.02 &&
+        (days === undefined || days <= 180);
+    });
+    if (!hasCreditNote) {
+      reviews.push(makeReview(
+        invoice,
+        "warning",
+        `Etsy-Bestellung ${order.reference} wurde vollständig erstattet, im Accountable-Export ist aber keine passende Stornorechnung erkennbar.`,
+        "etsy-full-refund-without-credit-note",
+      ));
+    }
+  }
+  return reviews;
 }
 
 function paypalRelatedLinks(records: NormalizedRecord[]): MatchLink[] {
@@ -615,10 +691,22 @@ function documentLinks(
       .filter((record) => record.category === "order")
       .map((record) => `${normalizeText(record.shop)}|${record.reference}`),
   );
+  const detailedOrderKeys = new Set(
+    allIncomeTargets
+      .filter((record) => record.category === "order-detail")
+      .map((record) => `${normalizeText(record.shop)}|${record.reference}`),
+  );
   const incomeTargets = allIncomeTargets.filter(
     (record) =>
-      record.category !== "order-detail" ||
-      !primaryOrderKeys.has(`${normalizeText(record.shop)}|${record.reference}`),
+      (
+        record.category !== "order" ||
+        !detailedOrderKeys.has(`${normalizeText(record.shop)}|${record.reference}`)
+      ) &&
+      (
+        record.category !== "order-detail" ||
+        !primaryOrderKeys.has(`${normalizeText(record.shop)}|${record.reference}`) ||
+        detailedOrderKeys.has(`${normalizeText(record.shop)}|${record.reference}`)
+      ),
   );
   const outgoingTargets = records.filter(
     (record) => active(record) && record.direction === "out" && PAYMENT_EVIDENCE_CATEGORIES.has(record.category),
@@ -1032,34 +1120,77 @@ function providerDocumentLinks(records: NormalizedRecord[], refundLinks: MatchLi
       (record.sourceKind === "gelato" || record.sourceKind === "printful-orders") &&
       !refundedCharges.has(record.id),
   );
-  const possible: Array<{ document: NormalizedRecord; charge: NormalizedRecord; days: number }> = [];
+  interface ProviderCandidate {
+    document: NormalizedRecord;
+    charge: NormalizedRecord;
+    days: number;
+  }
+  const possible: ProviderCandidate[] = [];
   for (const document of documents) {
     for (const charge of charges) {
-      if (canonicalParty(document.counterparty) !== canonicalParty(charge.counterparty)) continue;
+      const provider = canonicalParty(document.counterparty);
+      if (provider !== canonicalParty(charge.counterparty)) continue;
       if (closestAmountDifference(document, charge) > 0.02) continue;
       const days = reconciliationDateDifference(document, charge) ?? 999;
-      if (days > dateTolerance) continue;
+      const maximumDays = provider === "printful" ? Math.max(45, dateTolerance) : dateTolerance;
+      if (days > maximumDays) continue;
       possible.push({ document, charge, days });
     }
   }
-  const usedDocuments = new Set<string>();
-  const usedCharges = new Set<string>();
-  return possible
-    .sort((left, right) => left.days - right.days || left.document.sourceRow - right.document.sourceRow || left.charge.sourceRow - right.charge.sourceRow)
-    .filter((candidate) => {
-      if (usedDocuments.has(candidate.document.id) || usedCharges.has(candidate.charge.id)) return false;
-      usedDocuments.add(candidate.document.id);
-      usedCharges.add(candidate.charge.id);
-      return true;
-    })
+  const groups = new Map<string, ProviderCandidate[]>();
+  for (const candidate of possible) {
+    const key = `${canonicalParty(candidate.document.counterparty)}|${Math.round(candidate.document.amount * 100)}`;
+    groups.set(key, [...(groups.get(key) ?? []), candidate]);
+  }
+  const selected: ProviderCandidate[] = [];
+  for (const candidates of groups.values()) {
+    const groupDocuments = [...new Map(candidates.map((candidate) => [candidate.document.id, candidate.document])).values()]
+      .sort((left, right) => (left.date ?? "").localeCompare(right.date ?? "") || left.sourceRow - right.sourceRow);
+    const groupCharges = [...new Map(candidates.map((candidate) => [candidate.charge.id, candidate.charge])).values()];
+    if (groupDocuments.length > 18 || groupCharges.length > 18) {
+      const usedDocuments = new Set<string>();
+      const usedCharges = new Set<string>();
+      selected.push(...[...candidates]
+        .sort((left, right) => left.days - right.days || left.document.sourceRow - right.document.sourceRow || left.charge.sourceRow - right.charge.sourceRow)
+        .filter((candidate) => {
+          if (usedDocuments.has(candidate.document.id) || usedCharges.has(candidate.charge.id)) return false;
+          usedDocuments.add(candidate.document.id);
+          usedCharges.add(candidate.charge.id);
+          return true;
+        }));
+      continue;
+    }
+    const chargeIndex = new Map(groupCharges.map((charge, index) => [charge.id, index]));
+    interface Assignment { matches: number; cost: number; pairs: ProviderCandidate[] }
+    const memo = new Map<string, Assignment>();
+    const solve = (documentIndex: number, mask: number): Assignment => {
+      if (documentIndex >= groupDocuments.length) return { matches: 0, cost: 0, pairs: [] };
+      const key = `${documentIndex}|${mask}`;
+      const cached = memo.get(key);
+      if (cached) return cached;
+      const document = groupDocuments[documentIndex];
+      let best = solve(documentIndex + 1, mask);
+      for (const candidate of candidates.filter((entry) => entry.document.id === document.id)) {
+        const index = chargeIndex.get(candidate.charge.id);
+        if (index === undefined || (mask & (1 << index))) continue;
+        const tail = solve(documentIndex + 1, mask | (1 << index));
+        const option = { matches: tail.matches + 1, cost: tail.cost + candidate.days, pairs: [candidate, ...tail.pairs] };
+        if (option.matches > best.matches || (option.matches === best.matches && option.cost < best.cost)) best = option;
+      }
+      memo.set(key, best);
+      return best;
+    };
+    selected.push(...solve(0, 0).pairs);
+  }
+  return selected
     .map((candidate) =>
       makeLink(
         candidate.document,
         candidate.charge,
         "document-order",
-        99,
-        "provider-document-order",
-        `${candidate.charge.counterparty}-Beleg und Anbieterauftrag centgenau · ${candidate.days} Tage Abstand`,
+        candidate.days <= dateTolerance ? 99 : 94,
+        "provider-document-global-assignment",
+        `${candidate.charge.counterparty}-Beleg und Anbieterauftrag global 1:1 zugeordnet · ${candidate.days} Tage Abstand`,
         true,
       ),
     );
@@ -1470,45 +1601,87 @@ function withheldFeeLinks(records: NormalizedRecord[]): MatchLink[] {
   )) {
     const platform = record.sourceKind === "etsy-statement" ? "etsy" : record.sourceKind === "ebay-ledger" ? "ebay" : "";
     if (!platform) continue;
-    if (platform === "etsy" && normalizeText(record.description).includes("sales tax paid by buyer")) continue;
+    if (platform === "etsy" && record.metadata.marketplaceTax === true) continue;
     const key = `${platform}|${normalizeText(record.shop)}|${record.date!.slice(0, 7)}`;
     feeGroups.set(key, [...(feeGroups.get(key) ?? []), record]);
   }
   const links: MatchLink[] = [];
-  const proposals = new Map<string, Array<{ document: NormalizedRecord; group: NormalizedRecord[] }>>();
   const documents = records.filter(
     (record) => active(record) && record.category === "document-expense" && /etsy|ebay/.test(normalizeText(record.counterparty)),
   );
+  const candidates: Array<{
+    document: NormalizedRecord;
+    groupKey: string;
+    group: NormalizedRecord[];
+    difference: number;
+    days: number;
+    basis: "net" | "gross";
+  }> = [];
   for (const document of documents) {
     const platform = normalizeText(document.counterparty).includes("etsy") ? "etsy" : "ebay";
-    const matches = [...feeGroups.entries()]
+    candidates.push(...[...feeGroups.entries()]
       .filter(([key]) => key.startsWith(`${platform}|`))
-      .map(([, group]) => ({
-        group,
-        total: roundMoney(group.reduce((sum, record) => {
+      .flatMap(([groupKey, group]) => {
+        const netTotal = roundMoney(group.reduce((sum, record) => {
           if (record.sourceKind === "ebay-ledger" && (record.category === "sale" || record.category === "refund")) {
             return sum + (record.feeAmount ?? 0);
           }
           return sum + (record.direction === "in" ? -record.amount : record.amount);
-        }, 0)),
-        days: Math.min(...group.map((record) => dateDifferenceDays(document.date, record.date) ?? 0)),
-      }))
-      .filter((entry) => Math.abs(entry.total - document.amount) <= 0.02 && entry.days <= 45);
-    if (matches.length !== 1) continue;
-    const groupKey = matches[0].group.map((record) => record.id).sort().join("|");
-    proposals.set(groupKey, [...(proposals.get(groupKey) ?? []), { document, group: matches[0].group }]);
+        }, 0));
+        const grossGroup = group.filter((record) => {
+          if (record.sourceKind !== "ebay-ledger") return true;
+          if (record.category === "sale" || record.category === "refund") return (record.feeAmount ?? 0) > 0;
+          return record.category === "fee" && record.direction === "out";
+        });
+        const grossTotal = roundMoney(grossGroup.reduce((sum, record) => {
+          if (record.category === "sale" || record.category === "refund") return sum + Math.max(0, record.feeAmount ?? 0);
+          return sum + record.amount;
+        }, 0));
+        const days = Math.min(...group.map((record) => dateDifferenceDays(document.date, record.date) ?? 0));
+        const variants: Array<{ basis: "net" | "gross"; total: number; group: NormalizedRecord[] }> = [
+          { basis: "net", total: netTotal, group },
+        ];
+        if (platform === "ebay" && Math.abs(grossTotal - netTotal) > 0.02) {
+          variants.push({ basis: "gross" as const, total: grossTotal, group: grossGroup });
+        }
+        return variants.map((variant) => ({ document, groupKey, days, ...variant }));
+      })
+      .map((entry) => ({ ...entry, difference: roundMoney(Math.abs(entry.total - document.amount)) }))
+      .filter((entry) => entry.difference <= 1.5 && entry.days <= 45));
   }
-  for (const options of proposals.values()) {
-    if (options.length !== 1) continue;
-    for (const fee of options[0].group) {
+  const byDocument = new Map(documents.map((document) => [
+    document.id,
+    candidates.filter((candidate) => candidate.document.id === document.id)
+      .sort((left, right) => left.difference - right.difference || left.days - right.days),
+  ]));
+  const byGroup = new Map([...feeGroups.keys()].map((groupKey) => [
+    groupKey,
+    candidates.filter((candidate) => candidate.groupKey === groupKey)
+      .sort((left, right) => left.difference - right.difference || left.days - right.days),
+  ]));
+  const assignedDocuments = new Set<string>();
+  const assignedGroups = new Set<string>();
+  for (const candidate of [...candidates].sort((left, right) => left.difference - right.difference || left.days - right.days)) {
+    if (assignedDocuments.has(candidate.document.id) || assignedGroups.has(candidate.groupKey)) continue;
+    if (byDocument.get(candidate.document.id)?.[0] !== candidate || byGroup.get(candidate.groupKey)?.[0] !== candidate) continue;
+    const documentRunnerUp = byDocument.get(candidate.document.id)?.[1];
+    const groupRunnerUp = byGroup.get(candidate.groupKey)?.[1];
+    if (documentRunnerUp && documentRunnerUp.difference === candidate.difference && documentRunnerUp.days === candidate.days) continue;
+    if (groupRunnerUp && groupRunnerUp.difference === candidate.difference && groupRunnerUp.days === candidate.days) continue;
+    assignedDocuments.add(candidate.document.id);
+    assignedGroups.add(candidate.groupKey);
+    const exact = candidate.difference <= 0.02;
+    for (const fee of candidate.group) {
       links.push(
         makeLink(
-          options[0].document,
+          candidate.document,
           fee,
           "group-payment",
-          99,
-          "platform-withheld-fees",
-          "Einbehaltene Plattformgebühren ergeben zusammen den Accountable-Beleg",
+          exact ? 99 : 90,
+          exact ? `platform-withheld-fees-${candidate.basis}` : `platform-withheld-fees-${candidate.basis}-variance`,
+          exact
+            ? `${candidate.basis === "gross" ? "Brutto-" : "Netto-"}Plattformgebühren ergeben zusammen den Accountable-Beleg`
+            : `Monatsgebühren dem Accountable-Beleg mit ${candidate.difference.toFixed(2)} EUR Abweichung zugeordnet`,
           true,
         ),
       );
@@ -1563,6 +1736,68 @@ function groupedBankPaymentLinks(records: NormalizedRecord[], existingLinks: Mat
   return links;
 }
 
+function groupedDocumentsToPaymentLinks(records: NormalizedRecord[], existingLinks: MatchLink[], dateTolerance: number): MatchLink[] {
+  const alreadyDirect = new Set(
+    existingLinks
+      .filter((link) => link.type === "document-payment" || link.type === "group-payment")
+      .flatMap((link) => [link.fromId, link.toId]),
+  );
+  const documents = records.filter(
+    (record) =>
+      active(record) &&
+      (record.category === "document-expense" || record.category === "tax-payment") &&
+      record.direction === "out" &&
+      !alreadyDirect.has(record.id),
+  );
+  const payments = records.filter(
+    (record) =>
+      active(record) &&
+      record.direction === "out" &&
+      (isPayPal(record) || isBank(record)) &&
+      !alreadyDirect.has(record.id),
+  );
+  const proposals: Array<{ payment: NormalizedRecord; documents: NormalizedRecord[]; days: number }> = [];
+  for (const payment of payments) {
+    const candidates = documents
+      .filter((document) => {
+        const days = reconciliationDateDifference(document, payment);
+        return document.amount < payment.amount &&
+          (days === undefined || days <= dateTolerance) &&
+          counterpartySimilarity(document, payment) >= 0.5;
+      })
+      .sort((left, right) => (reconciliationDateDifference(left, payment) ?? 99) - (reconciliationDateDifference(right, payment) ?? 99))
+      .slice(0, 12);
+    const solutions = subsetIndexes(candidates.map((document) => document.amount), payment.amount);
+    if (solutions.length !== 1) continue;
+    const selected = solutions[0].map((index) => candidates[index]);
+    proposals.push({
+      payment,
+      documents: selected,
+      days: Math.max(...selected.map((document) => reconciliationDateDifference(document, payment) ?? 0)),
+    });
+  }
+  const usedDocuments = new Set<string>();
+  const usedPayments = new Set<string>();
+  const links: MatchLink[] = [];
+  for (const proposal of proposals.sort((left, right) => left.days - right.days)) {
+    if (usedPayments.has(proposal.payment.id) || proposal.documents.some((document) => usedDocuments.has(document.id))) continue;
+    usedPayments.add(proposal.payment.id);
+    proposal.documents.forEach((document) => usedDocuments.add(document.id));
+    for (const document of proposal.documents) {
+      links.push(makeLink(
+        document,
+        proposal.payment,
+        "group-payment",
+        99,
+        "multiple-documents-single-payment",
+        `${proposal.documents.length} Belege ergeben zusammen die Zahlung ${proposal.payment.amount.toFixed(2)} €`,
+        true,
+      ));
+    }
+  }
+  return links;
+}
+
 function deduplicateLinks(links: MatchLink[]): MatchLink[] {
   const map = new Map<string, MatchLink>();
   for (const link of links.sort((left, right) => right.confidence - left.confidence)) {
@@ -1579,6 +1814,7 @@ export function runMatching(records: NormalizedRecord[], dateTolerance = 20, amo
   const contexts = paypalContext(records, paypalRelated);
   const document = documentLinks(records, dateTolerance, amountTolerance, contexts);
   const etsyReviewed = etsyDocumentReviewLinks(records);
+  const refundedEtsyReviews = fullyRefundedEtsyInvoiceReviews(records);
   const platformAggregate = documentAggregateLinks(records, dateTolerance);
   const foreignCurrency = foreignCurrencyMerchantLinks(records);
   const providerRefunds = providerRefundLinks(records);
@@ -1606,7 +1842,12 @@ export function runMatching(records: NormalizedRecord[], dateTolerance = 20, amo
   ];
   const merchantVariants = acceptedMerchantVariantLinks(records, baseLinks);
   const yearlyExact = uniqueYearlyExactMerchantLinks(records, [...baseLinks, ...merchantVariants]);
-  const links = deduplicateLinks([...baseLinks, ...merchantVariants, ...yearlyExact, ...groupedBankPaymentLinks(records, baseLinks, dateTolerance)]);
+  const linksBeforeGroups = [...baseLinks, ...merchantVariants, ...yearlyExact];
+  const links = deduplicateLinks([
+    ...linksBeforeGroups,
+    ...groupedBankPaymentLinks(records, linksBeforeGroups, dateTolerance),
+    ...groupedDocumentsToPaymentLinks(records, linksBeforeGroups, dateTolerance),
+  ]);
   const linkedPairs = new Set(links.map((link) => pairKey(link.fromId, link.toId, link.type)));
   const adjacency = adjacencyFromLinks(links);
   const candidates = document.candidates.filter(
@@ -1614,7 +1855,7 @@ export function runMatching(records: NormalizedRecord[], dateTolerance = 20, amo
       !linkedPairs.has(pairKey(candidate.fromId, candidate.toId, candidate.type)) &&
       !connectedIds(candidate.fromId, adjacency).has(candidate.toId),
   );
-  return { links, candidates, reviews: etsyReviewed.reviews };
+  return { links, candidates, reviews: [...etsyReviewed.reviews, ...refundedEtsyReviews] };
 }
 
 interface ReconciliationState {
@@ -1633,6 +1874,16 @@ export function reconciliationAxes(
     reviewsByRecord.set(review.recordId, [...(reviewsByRecord.get(review.recordId) ?? []), review]);
   }
   const adjacency = adjacencyFromLinks(links);
+  const businessAdjacency = adjacencyFromLinks(
+    links.filter((link) => {
+      if (["document-order", "platform-evidence", "manual"].includes(link.type)) return true;
+      if (link.type !== "group-payment") return false;
+      const from = recordMap.get(link.fromId);
+      const to = recordMap.get(link.toId);
+      return [from, to].some((record) => record?.category === "document-income") &&
+        [from, to].some((record) => record && ["order", "order-detail", "sale", "refund"].includes(record.category));
+    }),
+  );
   const paypalBalances = paypalBalancedCurrencies(records);
   const orderCustomers = new Set(
     records
@@ -1673,9 +1924,12 @@ export function reconciliationAxes(
     const component = [...connectedIds(record.id, adjacency)]
       .map((id) => recordMap.get(id))
       .filter((entry): entry is NormalizedRecord => Boolean(entry));
-    const hasDocument = component.some((entry) => DOCUMENT_CATEGORIES.has(entry.category));
-    const hasOrder = component.some((entry) => entry.category === "order" || entry.category === "order-detail");
-    const hasProviderOrder = component.some((entry) => entry.category === "wallet-charge");
+    const businessComponent = [...connectedIds(record.id, businessAdjacency)]
+      .map((id) => recordMap.get(id))
+      .filter((entry): entry is NormalizedRecord => Boolean(entry));
+    const hasDirectDocument = businessComponent.some((entry) => entry.category === "document-income");
+    const hasDirectOrder = businessComponent.some((entry) => entry.category === "order" || entry.category === "order-detail");
+    const hasDirectProviderOrder = businessComponent.some((entry) => entry.category === "wallet-charge");
     const hasBank = component.some(isBank);
     const paypalRecords = component.filter(isPayPal);
     const hasPayPal = paypalRecords.length > 0;
@@ -1699,7 +1953,7 @@ export function reconciliationAxes(
         businessReason = "Steuerbeleg benötigt keine Plattformbestellung";
       } else if (record.category === "document-expense") {
         const provider = canonicalParty(record.counterparty);
-        if (hasProviderOrder) {
+        if (hasDirectProviderOrder) {
           businessEvidence = "confirmed";
           businessReason = "Accountable-Beleg und Anbieterauftrag verbunden";
         } else if (provider === "gelato" || provider === "printful") {
@@ -1708,9 +1962,9 @@ export function reconciliationAxes(
         } else {
           businessReason = "Für diese Eingangsrechnung liegt kein separater Bestellexport vor";
         }
-      } else if (hasOrder || hasProviderOrder) {
+      } else if (hasDirectOrder || hasDirectProviderOrder) {
         businessEvidence = "confirmed";
-        businessReason = hasOrder ? "Accountable-Beleg und Bestellung verbunden" : "Accountable-Beleg und Anbieterauftrag verbunden";
+        businessReason = hasDirectOrder ? "Accountable-Beleg und konkrete Bestellung direkt verbunden" : "Accountable-Beleg und Anbieterauftrag direkt verbunden";
       } else if (knownRoyaltyDocument && hasPaymentAccount) {
         businessEvidence = "confirmed";
         businessReason = "Plattformrechnung ohne separaten Bestellexport; Zahlung eindeutig zugeordnet";
@@ -1721,8 +1975,8 @@ export function reconciliationAxes(
         businessReason = "Kein separater Bestell- oder Plattformexport für diesen Beleg vorhanden";
       }
     } else if (record.category === "order") {
-      businessEvidence = hasDocument ? "confirmed" : "open";
-      businessReason = hasDocument ? "Bestellung und Accountable-Beleg verbunden" : "Kein Accountable-Beleg verbunden";
+      businessEvidence = hasDirectDocument ? "confirmed" : "open";
+      businessReason = hasDirectDocument ? "Bestellung und Accountable-Beleg direkt verbunden" : "Kein Accountable-Beleg direkt verbunden";
     }
 
     let paymentEvidence: ReconciliationAxes["paymentEvidence"] = "not-applicable";

@@ -15,16 +15,12 @@ import { createDemoProject } from "./lib/demo";
 import { applyGlobalTestIdentities, applyShopifyAllowList, parseImportFile } from "./lib/importer";
 import { runMatchingInBrowser } from "./lib/matching-client";
 import { coverageSummary, manualLink } from "./lib/matching";
-import { createProject, mergeParsedFiles, preserveUserLinks, updateSourceShop } from "./lib/project";
+import { canonicalEtsyShop, createProject, filterCandidatesAgainstDecisions, mergeParsedFiles, preserveUserLinks, updateSourceShop } from "./lib/project";
 import { clearProject, downloadProject, loadProject, readProjectFile, saveProject } from "./lib/storage";
-import type { BuchrecProject, Disposition, MatchCandidate, MatchLink, NormalizedRecord, ProjectSettings, RecordReview, ReviewStatus } from "./types";
+import type { BuchrecProject, DecisionAudit, Disposition, MatchCandidate, NormalizedRecord, ProjectSettings, RecordReview, ReviewStatus } from "./types";
 
 interface QueuedFile extends PendingUpload {
   file: File;
-}
-
-function decisionKey(link: MatchLink): string {
-  return [...[link.fromId, link.toId].sort(), link.type].join("|");
 }
 
 function applyShopifyRules(records: NormalizedRecord[], project: BuchrecProject): NormalizedRecord[] {
@@ -79,13 +75,12 @@ function App() {
     const validIds = new Set(records.map((record) => record.id));
     const previous = base.links.filter((link) => validIds.has(link.fromId) && validIds.has(link.toId));
     const links = preserveUserLinks(matching.links, previous);
-    const rejected = new Set(links.filter((link) => link.rejected).map(decisionKey));
     const manualReviews = (base.reviews ?? []).filter((review) => !review.automatic && validIds.has(review.recordId));
     return {
       ...base,
       records,
       links,
-      candidates: matching.candidates.filter((candidate) => !rejected.has(decisionKey(candidate))),
+      candidates: filterCandidatesAgainstDecisions(matching.candidates, links),
       reviews: [...manualReviews, ...matching.reviews],
       updatedAt: new Date().toISOString(),
     };
@@ -178,7 +173,9 @@ function App() {
   };
 
   const handleShopChange = (sourceId: string, shop: string) => {
-    const changed = updateSourceShop(project.sources, project.records, sourceId, shop);
+    const source = project.sources.find((entry) => entry.id === sourceId);
+    const canonical = source?.kind.startsWith("etsy") ? canonicalEtsyShop(shop, project.settings.etsyShopAliases) : shop;
+    const changed = updateSourceShop(project.sources, project.records, sourceId, canonical);
     void updateAndReconcile({ ...project, sources: changed.sources }, changed.records);
   };
 
@@ -194,23 +191,39 @@ function App() {
   };
 
   const handleSettings = (settings: ProjectSettings) => {
-    const base = { ...project, settings };
+    const aliasesChanged = JSON.stringify(settings.etsyShopAliases) !== JSON.stringify(project.settings.etsyShopAliases);
+    const canonicalSources = aliasesChanged
+      ? project.sources.map((source) => source.kind.startsWith("etsy") ? { ...source, shop: canonicalEtsyShop(source.shop ?? "", settings.etsyShopAliases) } : source)
+      : project.sources;
+    const canonicalRecords = aliasesChanged
+      ? project.records.map((record) => record.sourceKind.startsWith("etsy") ? { ...record, shop: canonicalEtsyShop(record.shop ?? "", settings.etsyShopAliases) } : record)
+      : project.records;
+    const base = { ...project, settings, sources: canonicalSources };
     const testIdentitiesChanged = JSON.stringify(settings.testIdentities) !== JSON.stringify(project.settings.testIdentities);
-    if (settings.dateToleranceDays === project.settings.dateToleranceDays && settings.amountTolerance === project.settings.amountTolerance && !testIdentitiesChanged) {
+    if (settings.dateToleranceDays === project.settings.dateToleranceDays && settings.amountTolerance === project.settings.amountTolerance && !testIdentitiesChanged && !aliasesChanged) {
       setProject({ ...base, updatedAt: new Date().toISOString() });
       return;
     }
-    void updateAndReconcile(base, applyShopifyRules(project.records, base));
+    void updateAndReconcile(base, applyShopifyRules(canonicalRecords, base));
   };
 
   const handleDisposition = (ids: string[], disposition: Disposition) => {
     const selected = new Set(ids);
+    const timestamp = new Date().toISOString();
+    const label = disposition === "private" ? "Als privat klassifiziert" : disposition === "test" ? "Als Test klassifiziert" : `Als ${disposition} klassifiziert`;
     const records = project.records.map((record) => selected.has(record.id) ? { ...record, disposition, dispositionReason: "Vom Nutzer klassifiziert" } : record);
-    void updateAndReconcile(project, records);
+    const decisions: DecisionAudit[] = ids.map((recordId) => ({
+      id: crypto.randomUUID(),
+      kind: "disposition",
+      recordIds: [recordId],
+      status: disposition,
+      note: label,
+      createdAt: timestamp,
+    }));
+    void updateAndReconcile({ ...project, decisions: [...project.decisions, ...decisions] }, records);
   };
 
   const handleReview = (ids: string[], status: ReviewStatus, note: string) => {
-    const selected = new Set(ids);
     const timestamp = new Date().toISOString();
     const additions: RecordReview[] = ids.map((recordId) => ({
       id: crypto.randomUUID(),
@@ -223,21 +236,76 @@ function App() {
     }));
     setProject((current) => ({
       ...current,
-      reviews: [
-        ...current.reviews.filter((review) => review.automatic || !selected.has(review.recordId)),
-        ...additions,
+      reviews: [...current.reviews, ...additions],
+      decisions: [
+        ...current.decisions,
+        ...ids.map((recordId) => ({
+          id: crypto.randomUUID(),
+          kind: "record-review" as const,
+          recordIds: [recordId],
+          status,
+          note,
+          createdAt: timestamp,
+        })),
       ],
       updatedAt: timestamp,
     }));
   };
 
-  const handleManualLink = (ids: string[]) => {
-    const additions = manualLink(project.records, ids);
-    setProject((current) => ({ ...current, links: [...current.links, ...additions], candidates: current.candidates.filter((candidate) => !additions.some((link) => decisionKey(link) === decisionKey(candidate))), updatedAt: new Date().toISOString() }));
+  const handleManualLink = (ids: string[], note: string) => {
+    const timestamp = new Date().toISOString();
+    const additions = manualLink(project.records, ids).map((link) => ({ ...link, reason: note }));
+    const decisions: DecisionAudit[] = additions.map((link) => ({
+      id: crypto.randomUUID(),
+      kind: "manual-link",
+      recordIds: [link.fromId, link.toId],
+      linkId: link.id,
+      note,
+      createdAt: timestamp,
+    }));
+    const base = {
+      ...project,
+      links: [...project.links, ...additions],
+      decisions: [...project.decisions, ...decisions],
+      updatedAt: timestamp,
+    };
+    void updateAndReconcile(base, project.records);
   };
 
-  const handleAccept = (candidate: MatchCandidate) => setProject((current) => ({ ...current, links: [...current.links, { ...candidate, automatic: false }], candidates: current.candidates.filter((item) => item.id !== candidate.id), updatedAt: new Date().toISOString() }));
-  const handleReject = (candidate: MatchCandidate) => setProject((current) => ({ ...current, links: [...current.links, { ...candidate, rejected: true, automatic: false }], candidates: current.candidates.filter((item) => item.id !== candidate.id), updatedAt: new Date().toISOString() }));
+  const handleAccept = (candidate: MatchCandidate, note: string) => {
+    const timestamp = new Date().toISOString();
+    const base: BuchrecProject = {
+      ...project,
+      links: [...project.links, { ...candidate, automatic: false }],
+      decisions: [...project.decisions, {
+        id: crypto.randomUUID(),
+        kind: "link-accepted",
+        recordIds: [candidate.fromId, candidate.toId],
+        linkId: candidate.id,
+        note: note || "Vorschlag geprüft und bestätigt",
+        createdAt: timestamp,
+      }],
+      updatedAt: timestamp,
+    };
+    void updateAndReconcile(base, project.records);
+  };
+  const handleReject = (candidate: MatchCandidate, note: string) => {
+    const timestamp = new Date().toISOString();
+    const base: BuchrecProject = {
+      ...project,
+      links: [...project.links, { ...candidate, rejected: true, automatic: false }],
+      decisions: [...project.decisions, {
+        id: crypto.randomUUID(),
+        kind: "link-rejected",
+        recordIds: [candidate.fromId, candidate.toId],
+        linkId: candidate.id,
+        note: note || "Vorschlag geprüft und abgelehnt",
+        createdAt: timestamp,
+      }],
+      updatedAt: timestamp,
+    };
+    void updateAndReconcile(base, project.records);
+  };
 
   const handleDelete = async () => {
     if (!window.confirm("Alle in diesem Browser gespeicherten buchrec-Daten wirklich löschen?")) return;

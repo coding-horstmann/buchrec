@@ -1,4 +1,4 @@
-import { Link2, MessageSquareText, Save, Search, X } from "lucide-react";
+import { ArrowUpDown, Link2, MessageSquareText, Save, Search, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { formatDate, formatMoney, normalizeText } from "../lib/normalize";
 import { effectiveRecordReviews, isReconciliationRecord, reconciliationAxes, reconciliationState } from "../lib/matching";
@@ -10,11 +10,12 @@ interface RecordsTableProps {
   reviews: RecordReview[];
   onlyExceptions?: boolean;
   onDisposition: (ids: string[], disposition: Disposition) => void;
-  onManualLink: (ids: string[]) => void;
+  onManualLink: (ids: string[], note: string) => void;
   onReview: (ids: string[], status: ReviewStatus, note: string) => void;
 }
 
 const PAGE_SIZE = 100;
+type SortKey = "amount" | "date" | "source" | "status";
 
 function EvidenceTag({ state, reason }: { state: EvidenceState; reason: string }) {
   const label = {
@@ -28,14 +29,18 @@ function EvidenceTag({ state, reason }: { state: EvidenceState; reason: string }
 
 function ReviewTag({ reviews }: { reviews: RecordReview[] }) {
   if (!reviews.length) return <span className="muted">–</span>;
-  const review = reviews.find((entry) => !entry.automatic) ?? reviews[0];
+  const ordered = [...reviews].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  const review = ordered.find((entry) => !entry.automatic) ?? ordered[0];
   const label = {
     "manual-cleared": "manuell geklärt",
     "open-note": "offen · Notiz",
     warning: "Warnung",
     "data-error": "Datenfehler",
   }[review.status];
-  return <span className={`status-tag review-${review.status}`} title={reviews.map((entry) => entry.note).join("\n")}>{label}</span>;
+  return <div className="review-cell">
+    <span className={`status-tag review-${review.status}`} title={ordered.map((entry) => `${new Date(entry.updatedAt).toLocaleString("de-DE")}: ${entry.note}`).join("\n")}>{label}</span>
+    <small>{review.note}</small>
+  </div>;
 }
 
 export function RecordsTable({ records, links, reviews, onlyExceptions = false, onDisposition, onManualLink, onReview }: RecordsTableProps) {
@@ -51,20 +56,33 @@ export function RecordsTable({ records, links, reviews, onlyExceptions = false, 
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(0);
   const [selected, setSelected] = useState<string[]>([]);
-  const [reviewEditor, setReviewEditor] = useState(false);
+  const [editor, setEditor] = useState<"review" | "link">();
   const [reviewStatus, setReviewStatus] = useState<ReviewStatus>("manual-cleared");
   const [reviewNote, setReviewNote] = useState("");
+  const [manualLinkNote, setManualLinkNote] = useState("");
+  const [sortKey, setSortKey] = useState<SortKey>("amount");
+  const [sortAscending, setSortAscending] = useState(false);
   const filtered = useMemo(() => {
     const needle = normalizeText(query);
     return records.filter((record) => {
       const flagged = effectiveReviews.get(record.id)?.status !== "manual-cleared" && effectiveReviews.has(record.id);
       if (onlyExceptions && (record.disposition !== "active" || (!state.open.has(record.id) && !flagged) || !isReconciliationRecord(record))) return false;
       return !needle || normalizeText(`${record.sourceFile} ${record.counterparty} ${record.reference} ${record.description} ${record.amount} ${record.date}`).includes(needle);
-    }).sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount));
-  }, [records, onlyExceptions, query, state.open, effectiveReviews]);
+    }).sort((left, right) => {
+      let comparison = 0;
+      if (sortKey === "amount") comparison = Math.abs(left.amount) - Math.abs(right.amount);
+      if (sortKey === "date") comparison = (left.date ?? "").localeCompare(right.date ?? "");
+      if (sortKey === "source") comparison = left.sourceFile.localeCompare(right.sourceFile, "de-DE") || left.sourceRow - right.sourceRow;
+      if (sortKey === "status") {
+        const status = (record: NormalizedRecord) => effectiveReviews.get(record.id)?.status ?? (state.open.has(record.id) ? "offen" : "geklärt");
+        comparison = status(left).localeCompare(status(right), "de-DE");
+      }
+      return (sortAscending ? comparison : -comparison) || left.id.localeCompare(right.id);
+    });
+  }, [records, onlyExceptions, query, state.open, effectiveReviews, sortKey, sortAscending]);
   const pages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const visible = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
-  useEffect(() => { setPage(0); setSelected([]); setReviewEditor(false); }, [query, onlyExceptions]);
+  useEffect(() => { setPage(0); setSelected([]); setEditor(undefined); }, [query, onlyExceptions, sortKey, sortAscending]);
 
   const apply = (disposition: Disposition) => { onDisposition(selected, disposition); setSelected([]); };
   return (
@@ -73,22 +91,42 @@ export function RecordsTable({ records, links, reviews, onlyExceptions = false, 
       <section className="panel table-panel">
         <div className="table-toolbar">
           <label className="search-field"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Gegenpartei, Referenz, Betrag …" /></label>
-          {selected.length > 0 && <div className="selection-actions"><strong>{selected.length} gewählt</strong><button className="button button-secondary button-small" disabled={selected.length < 2} onClick={() => { onManualLink(selected); setSelected([]); }}><Link2 size={15} /> Verbinden</button><button className="button button-ghost button-small" onClick={() => setReviewEditor((current) => !current)}><MessageSquareText size={15} /> Bewerten</button><button className="button button-ghost button-small" onClick={() => apply("test")}>Test</button><button className="button button-ghost button-small" onClick={() => apply("private")}>Privat</button><button className="icon-button" aria-label="Auswahl aufheben" onClick={() => setSelected([])}><X size={16} /></button></div>}
+          <div className="sort-controls">
+            <label>Sortieren
+              <select aria-label="Sortierfeld" value={sortKey} onChange={(event) => setSortKey(event.target.value as SortKey)}>
+                <option value="amount">Betrag</option>
+                <option value="date">Datum</option>
+                <option value="source">Quelle</option>
+                <option value="status">Status</option>
+              </select>
+            </label>
+            <button className="button button-ghost button-small" onClick={() => setSortAscending((current) => !current)}><ArrowUpDown size={15} /> {sortAscending ? "Aufsteigend" : "Absteigend"}</button>
+          </div>
+          {selected.length > 0 && <div className="selection-actions"><strong>{selected.length} gewählt</strong><button className="button button-secondary button-small" disabled={selected.length < 2} onClick={() => setEditor((current) => current === "link" ? undefined : "link")}><Link2 size={15} /> Verbinden</button><button className="button button-ghost button-small" onClick={() => setEditor((current) => current === "review" ? undefined : "review")}><MessageSquareText size={15} /> Bewerten</button><button className="button button-ghost button-small" onClick={() => apply("test")}>Test</button><button className="button button-ghost button-small" onClick={() => apply("private")}>Privat</button><button className="icon-button" aria-label="Auswahl aufheben" onClick={() => setSelected([])}><X size={16} /></button></div>}
         </div>
-        {reviewEditor && selected.length > 0 && <div className="review-editor">
-          <select value={reviewStatus} onChange={(event) => setReviewStatus(event.target.value as ReviewStatus)}>
+        {editor === "review" && selected.length > 0 && <div className="review-editor">
+          <select aria-label="Bewertungsstatus" value={reviewStatus} onChange={(event) => setReviewStatus(event.target.value as ReviewStatus)}>
             <option value="manual-cleared">Manuell geklärt</option>
             <option value="open-note">Offen mit Anmerkung</option>
             <option value="warning">Warnung</option>
             <option value="data-error">Datenfehler</option>
           </select>
-          <textarea value={reviewNote} onChange={(event) => setReviewNote(event.target.value)} rows={2} placeholder="Anmerkung …" />
+          <textarea aria-label="Anmerkung zur Bewertung" value={reviewNote} onChange={(event) => setReviewNote(event.target.value)} rows={2} placeholder="Anmerkung …" />
           <button className="button button-primary button-small" disabled={!reviewNote.trim()} onClick={() => {
             onReview(selected, reviewStatus, reviewNote.trim());
             setSelected([]);
-            setReviewEditor(false);
+            setEditor(undefined);
             setReviewNote("");
           }}><Save size={15} /> Speichern</button>
+        </div>}
+        {editor === "link" && selected.length > 1 && <div className="review-editor">
+          <textarea aria-label="Begründung der manuellen Verbindung" value={manualLinkNote} onChange={(event) => setManualLinkNote(event.target.value)} rows={2} placeholder="Warum gehören diese Datensätze zusammen?" />
+          <button className="button button-primary button-small" disabled={!manualLinkNote.trim()} onClick={() => {
+            onManualLink(selected, manualLinkNote.trim());
+            setSelected([]);
+            setEditor(undefined);
+            setManualLinkNote("");
+          }}><Save size={15} /> Verbindung speichern</button>
         </div>}
         <div className="table-wrap">
           <table className="records-table">

@@ -26,6 +26,7 @@ export type RecordCategory =
   | "order"
   | "order-detail"
   | "sale"
+  | "buyer-fee"
   | "fee"
   | "refund"
   | "payout"
@@ -37,6 +38,12 @@ export type RecordCategory =
 export type Direction = "in" | "out" | "neutral";
 export type Disposition = "active" | "test" | "private" | "ignored" | "resolved";
 export type ReviewStatus = "manual-cleared" | "open-note" | "warning" | "data-error";
+export type DecisionKind =
+  | "record-review"
+  | "link-accepted"
+  | "link-rejected"
+  | "manual-link"
+  | "disposition";
 
 export interface SourceImport {
   id: string;
@@ -126,10 +133,25 @@ export interface RecordReview {
   updatedAt: string;
 }
 
+export interface DecisionAudit {
+  id: string;
+  kind: DecisionKind;
+  recordIds: string[];
+  linkId?: string;
+  status?: ReviewStatus | Disposition;
+  note: string;
+  createdAt: string;
+}
+
 export interface ShopifyRule {
   shop: string;
   mode: "zero-only" | "allow-list";
   genuineCustomers: string[];
+}
+
+export interface EtsyShopAlias {
+  shop: string;
+  aliases: string[];
 }
 
 export interface ProjectSettings {
@@ -138,6 +160,7 @@ export interface ProjectSettings {
   amountTolerance: number;
   testIdentities: string[];
   shopifyRules: ShopifyRule[];
+  etsyShopAliases: EtsyShopAlias[];
 }
 
 export interface BuchrecProject {
@@ -151,6 +174,7 @@ export interface BuchrecProject {
   links: MatchLink[];
   candidates: MatchCandidate[];
   reviews: RecordReview[];
+  decisions: DecisionAudit[];
 }
 
 export interface ParsedFileResult {
@@ -210,6 +234,7 @@ export interface PlatformPeriodSummary {
   inflows: number;
   sellerRevenue: number;
   marketplaceTax: number;
+  buyerFees: number;
   fees: number;
   refunds: number;
   charges: number;
@@ -232,6 +257,7 @@ export interface PlatformControlAxis {
   difference: number;
   state: ControlState;
   detail: string;
+  mode?: "comparison" | "balance";
 }
 
 export interface PlatformReconciliation {
@@ -245,8 +271,10 @@ export interface PlatformReconciliation {
   platformAxis: PlatformControlAxis;
   paymentAxis: PlatformControlAxis;
   sellerRevenue: number;
+  documentRevenue: number;
   buyerPayments: number;
   marketplaceTax: number;
+  buyerFees: number;
   feeCharges: number;
   fees: number;
   feeCorrections: number;
