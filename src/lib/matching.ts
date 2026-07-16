@@ -6,6 +6,7 @@ import type {
   NormalizedRecord,
   ReconciliationAxes,
   RecordCategory,
+  RecordReview,
 } from "../types";
 import { dateDifferenceDays, makeId, normalizeText, referenceTokens, roundMoney } from "./normalize";
 
@@ -140,7 +141,15 @@ function normalizedNameTokens(value: string): Set<string> {
 function counterpartyTokens(record: NormalizedRecord): Set<string> {
   const cached = counterpartyCache.get(record.id);
   if (cached) return cached;
-  const result = normalizedNameTokens(record.counterparty);
+  const result = new Set<string>();
+  for (const value of [
+    record.counterparty,
+    record.metadata.buyer,
+    record.metadata.buyerUserId,
+    record.metadata.shippingCompany,
+  ]) {
+    for (const token of normalizedNameTokens(String(value ?? ""))) result.add(token);
+  }
   counterpartyCache.set(record.id, result);
   return result;
 }
@@ -186,6 +195,124 @@ function makeLink(
     reason,
     automatic,
   };
+}
+
+function makeReview(
+  record: NormalizedRecord,
+  status: RecordReview["status"],
+  note: string,
+  code: string,
+): RecordReview {
+  const timestamp = new Date().toISOString();
+  return {
+    id: makeId(record.id, status, code),
+    recordId: record.id,
+    status,
+    note,
+    automatic: true,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+}
+
+function etsyDocumentReviewLinks(records: NormalizedRecord[]): {
+  links: MatchLink[];
+  reviews: RecordReview[];
+} {
+  const documents = records.filter(
+    (record) => active(record) && record.category === "document-income",
+  );
+  const orders = records.filter(
+    (record) => active(record) && record.sourceKind === "etsy-sales" && record.category === "order",
+  );
+  const detailsByOrder = new Map<string, NormalizedRecord[]>();
+  for (const detail of records.filter(
+    (record) => active(record) && record.sourceKind === "etsy-sold-orders" && record.category === "order-detail",
+  )) {
+    const key = `${normalizeText(detail.shop)}|${detail.reference}`;
+    detailsByOrder.set(key, [...(detailsByOrder.get(key) ?? []), detail]);
+  }
+
+  const links: MatchLink[] = [];
+  const reviews: RecordReview[] = [];
+  const usedOrders = new Set<string>();
+  for (const document of documents) {
+    const possible = orders
+      .map((order) => {
+        const details = detailsByOrder.get(`${normalizeText(order.shop)}|${order.reference}`) ?? [];
+        const similarity = Math.max(
+          counterpartySimilarity(document, order),
+          ...details.map((detail) => counterpartySimilarity(document, detail)),
+        );
+        const days = reconciliationDateDifference(document, order);
+        const listingAmount = Number(order.metadata.listingAmount);
+        const sellerAmount = order.amount;
+        const sellerMatch = Math.abs(document.amount - sellerAmount) <= 0.02;
+        const buyerTotalMatch = Number.isFinite(listingAmount) && Math.abs(document.amount - listingAmount) <= 0.02;
+        const zeroInvoice = document.amount === 0 && sellerAmount > 0;
+        if (similarity < 1 || (days !== undefined && days > 20) || (!sellerMatch && !buyerTotalMatch && !zeroInvoice)) return undefined;
+        return {
+          order,
+          days: days ?? 0,
+          listingAmount,
+          sellerAmount,
+          sellerMatch,
+          buyerTotalMatch,
+          zeroInvoice,
+        };
+      })
+      .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry))
+      .sort((left, right) => left.days - right.days || left.order.sourceRow - right.order.sourceRow);
+    if (possible.length !== 1 || usedOrders.has(possible[0].order.id)) continue;
+    const match = possible[0];
+    usedOrders.add(match.order.id);
+    const taxDifference = roundMoney(match.listingAmount - match.sellerAmount);
+
+    if (match.zeroInvoice) {
+      links.push(makeLink(
+        document,
+        match.order,
+        "document-order",
+        100,
+        "etsy-zero-invoice-data-error",
+        `Etsy-Bestellung ${match.order.reference} identifiziert; Accountable-Beleg hat 0,00 EUR`,
+        true,
+      ));
+      reviews.push(makeReview(
+        document,
+        "data-error",
+        `Accountable enthält 0,00 EUR, Etsy weist für Bestellung ${match.order.reference} ${match.sellerAmount.toFixed(2)} EUR Verkäuferumsatz aus.`,
+        "etsy-zero-invoice",
+      ));
+    } else if (match.buyerTotalMatch && taxDifference > 0.02) {
+      links.push(makeLink(
+        document,
+        match.order,
+        "document-order",
+        100,
+        "etsy-buyer-total-sales-tax-warning",
+        `Beleg entspricht Käufergesamtbetrag; ${taxDifference.toFixed(2)} EUR Marketplace Sales Tax sind nicht Verkäuferumsatz`,
+        true,
+      ));
+      reviews.push(makeReview(
+        document,
+        "warning",
+        `Zugeordnet mit Warnung: Der Accountable-Beleg enthält ${taxDifference.toFixed(2)} EUR von Etsy abgeführte Marketplace Sales Tax.`,
+        "etsy-sales-tax-invoice",
+      ));
+    } else {
+      links.push(makeLink(
+        document,
+        match.order,
+        "document-order",
+        100,
+        "etsy-related-party-exact",
+        `Etsy-Bestellung ${match.order.reference} über Käufer-, Empfänger- oder Firmenidentität centgenau zugeordnet`,
+        true,
+      ));
+    }
+  }
+  return { links, reviews };
 }
 
 function paypalRelatedLinks(records: NormalizedRecord[]): MatchLink[] {
@@ -536,7 +663,7 @@ function documentLinks(
     if (ambiguous) candidates.push({ ...link, automatic: false, rule: "document-candidate-duplicate-target" });
     else links.push(link);
   }
-  return { links, candidates };
+  return { links, candidates, reviews: [] };
 }
 
 function foreignCurrencyMerchantLinks(records: NormalizedRecord[]): MatchLink[] {
@@ -736,6 +863,69 @@ function payoutLinks(records: NormalizedRecord[]): MatchLink[] {
   return links;
 }
 
+function platformDebitLinks(records: NormalizedRecord[]): MatchLink[] {
+  const transfers = records.filter(
+    (record) =>
+      active(record) &&
+      record.sourceKind === "ebay-ledger" &&
+      record.category === "transfer" &&
+      record.direction === "in",
+  );
+  const bankDebits = records.filter(
+    (record) =>
+      active(record) &&
+      isBank(record) &&
+      record.category === "cash-movement" &&
+      record.direction === "out" &&
+      normalizeText(`${record.counterparty} ${record.description}`).includes("ebay"),
+  );
+  const possible: Array<{ transfer: NormalizedRecord; bank: NormalizedRecord; days: number }> = [];
+  for (const transfer of transfers) {
+    for (const bank of bankDebits) {
+      if (closestAmountDifference(transfer, bank) > 0.02) continue;
+      const days = dateDifferenceDays(transfer.date, bank.date);
+      if (days === undefined || days > 7) continue;
+      possible.push({ transfer, bank, days });
+    }
+  }
+  const closestTransfer = new Map<string, typeof possible>();
+  const closestBank = new Map<string, typeof possible>();
+  for (const candidate of possible) {
+    closestTransfer.set(
+      candidate.transfer.id,
+      [...(closestTransfer.get(candidate.transfer.id) ?? []), candidate]
+        .sort((left, right) => left.days - right.days),
+    );
+    closestBank.set(
+      candidate.bank.id,
+      [...(closestBank.get(candidate.bank.id) ?? []), candidate]
+        .sort((left, right) => left.days - right.days),
+    );
+  }
+  return possible
+    .filter((candidate) => {
+      const transferBest = closestTransfer.get(candidate.transfer.id) ?? [];
+      const bankBest = closestBank.get(candidate.bank.id) ?? [];
+      return (
+        transferBest[0] === candidate &&
+        bankBest[0] === candidate &&
+        (!transferBest[1] || transferBest[1].days > candidate.days) &&
+        (!bankBest[1] || bankBest[1].days > candidate.days)
+      );
+    })
+    .map((candidate) =>
+      makeLink(
+        candidate.transfer,
+        candidate.bank,
+        "payout-bank",
+        99,
+        "ebay-debit-bank",
+        `eBay-Belastung und FYRST/N26-Abbuchung centgenau · ${candidate.days} Tage Abstand`,
+        true,
+      ),
+    );
+}
+
 function walletLinks(records: NormalizedRecord[]): MatchLink[] {
   const walletFunding = records.filter((record) => active(record) && record.category === "wallet-funding");
   const paypalOutgoing = records.filter((record) => active(record) && isPayPal(record) && record.direction === "out");
@@ -875,59 +1065,145 @@ function providerDocumentLinks(records: NormalizedRecord[], refundLinks: MatchLi
     );
 }
 
-function internalTransferLinks(records: NormalizedRecord[]): MatchLink[] {
-  const cash = records.filter(
-    (record) => active(record) && (isBank(record) || isPayPal(record)) && (CASH_CATEGORIES.has(record.category) || record.category === "cash-movement"),
-  );
-  const candidates: Array<{ left: NormalizedRecord; right: NormalizedRecord; days: number; score: number }> = [];
-  for (let leftIndex = 0; leftIndex < cash.length; leftIndex += 1) {
-    for (let rightIndex = leftIndex + 1; rightIndex < cash.length; rightIndex += 1) {
-      const left = cash[leftIndex];
-      const right = cash[rightIndex];
-      if (left.sourceKind === right.sourceKind || left.direction === "neutral" || right.direction === "neutral") continue;
-      if (!(isPayPal(left) || isPayPal(right)) || closestAmountDifference(left, right) > 0.02) continue;
-      const days = dateDifferenceDays(left.date, right.date) ?? 0;
-      if (days > 5) continue;
-      const text = normalizeText(`${left.counterparty} ${left.description} ${right.counterparty} ${right.description}`);
-      const explicitTransfer = left.category === "transfer" || right.category === "transfer";
-      const namedPayPal = text.includes("paypal");
-      if (left.direction === right.direction && !namedPayPal) continue;
-      if (left.direction !== right.direction && !explicitTransfer && !namedPayPal) continue;
-      candidates.push({
-        left,
-        right,
-        days,
-        score: (left.direction !== right.direction && explicitTransfer ? 20 : 0) + (left.direction === right.direction ? 10 : 0) - days,
+interface PayPalBankCandidate {
+  bank: NormalizedRecord;
+  paypal: NormalizedRecord;
+  days: number;
+  cost: number;
+  structured: boolean;
+}
+
+function bestGlobalAssignment(
+  banks: NormalizedRecord[],
+  candidates: PayPalBankCandidate[],
+): PayPalBankCandidate[] {
+  const paypal = [...new Map(candidates.map((candidate) => [candidate.paypal.id, candidate.paypal])).values()];
+  const paypalIndex = new Map(paypal.map((record, index) => [record.id, index]));
+  if (paypal.length > 18 || banks.length > 18) {
+    const used = new Set<string>();
+    return [...candidates]
+      .sort((left, right) => left.cost - right.cost || left.days - right.days)
+      .filter((candidate) => {
+        if (used.has(candidate.bank.id) || used.has(candidate.paypal.id)) return false;
+        used.add(candidate.bank.id);
+        used.add(candidate.paypal.id);
+        return true;
       });
+  }
+
+  interface Assignment {
+    matches: number;
+    cost: number;
+    pairs: PayPalBankCandidate[];
+  }
+  const byBank = new Map(
+    banks.map((bank) => [bank.id, candidates.filter((candidate) => candidate.bank.id === bank.id)]),
+  );
+  const memo = new Map<string, Assignment>();
+  const solve = (bankIndex: number, mask: number): Assignment => {
+    if (bankIndex >= banks.length) return { matches: 0, cost: 0, pairs: [] };
+    const key = `${bankIndex}|${mask}`;
+    const cached = memo.get(key);
+    if (cached) return cached;
+    let best = solve(bankIndex + 1, mask);
+    for (const candidate of byBank.get(banks[bankIndex].id) ?? []) {
+      const index = paypalIndex.get(candidate.paypal.id);
+      if (index === undefined || (mask & (1 << index))) continue;
+      const tail = solve(bankIndex + 1, mask | (1 << index));
+      const option: Assignment = {
+        matches: tail.matches + 1,
+        cost: tail.cost + candidate.cost,
+        pairs: [candidate, ...tail.pairs],
+      };
+      if (
+        option.matches > best.matches ||
+        (option.matches === best.matches && option.cost < best.cost)
+      ) {
+        best = option;
+      }
+    }
+    memo.set(key, best);
+    return best;
+  };
+  return solve(0, 0).pairs;
+}
+
+function internalTransferLinks(records: NormalizedRecord[]): MatchLink[] {
+  const banks = records.filter(
+    (record) =>
+      active(record) &&
+      isBank(record) &&
+      record.direction !== "neutral" &&
+      normalizeText(`${record.counterparty} ${record.description}`).includes("paypal"),
+  );
+  const paypal = records.filter(
+    (record) => active(record) && isPayPal(record) && record.direction !== "neutral",
+  );
+  const groups = new Map<string, NormalizedRecord[]>();
+  for (const bank of banks) {
+    const key = `${bank.currency}|${Math.round(bank.amount * 100)}|${bank.direction}`;
+    groups.set(key, [...(groups.get(key) ?? []), bank]);
+  }
+
+  const assignments: PayPalBankCandidate[] = [];
+  const usedPayPal = new Set<string>();
+  for (const groupBanks of groups.values()) {
+    const candidates: PayPalBankCandidate[] = [];
+    for (const bank of groupBanks) {
+      for (const entry of paypal) {
+        if (entry.currency !== bank.currency || closestAmountDifference(bank, entry) > 0.02) continue;
+        const days = dateDifferenceDays(bank.date, entry.date);
+        if (days === undefined || days > 10) continue;
+        const description = normalizeText(entry.description);
+        const bankFunding =
+          bank.direction === "out" &&
+          entry.direction === "in" &&
+          entry.category === "transfer" &&
+          (description.includes("bankgutschrift") || description.includes("paypal konto"));
+        const bankWithdrawal =
+          bank.direction === "in" &&
+          entry.direction === "out" &&
+          entry.category === "transfer" &&
+          (description.includes("abbuchung") || description.includes("bankkonto"));
+        const merchantRefund =
+          bank.direction === "in" &&
+          entry.direction === "in" &&
+          entry.category !== "transfer";
+        const directMerchantPayment =
+          bank.direction === "out" &&
+          entry.direction === "out" &&
+          !(entry.category === "transfer" && (description.includes("abbuchung") || description.includes("bankkonto")));
+        if (!bankFunding && !bankWithdrawal && !merchantRefund && !directMerchantPayment) continue;
+        const structured = bankFunding || bankWithdrawal || merchantRefund;
+        const merchantSimilarity = counterpartySimilarity(bank, entry);
+        const typePenalty = structured ? 0 : 20;
+        candidates.push({
+          bank,
+          paypal: entry,
+          days,
+          cost: days * 10 + typePenalty - Math.round(merchantSimilarity * 3),
+          structured,
+        });
+      }
+    }
+    for (const assignment of bestGlobalAssignment(groupBanks, candidates)) {
+      if (usedPayPal.has(assignment.paypal.id)) continue;
+      usedPayPal.add(assignment.paypal.id);
+      assignments.push(assignment);
     }
   }
-  const byRecord = new Map<string, typeof candidates>();
-  for (const candidate of candidates) {
-    byRecord.set(candidate.left.id, [...(byRecord.get(candidate.left.id) ?? []), candidate]);
-    byRecord.set(candidate.right.id, [...(byRecord.get(candidate.right.id) ?? []), candidate]);
-  }
-  const bestFor = (recordId: string) => {
-    const sorted = [...(byRecord.get(recordId) ?? [])].sort((left, right) => right.score - left.score || left.days - right.days);
-    if (!sorted.length || (sorted[1] && sorted[1].score === sorted[0].score && sorted[1].days === sorted[0].days)) return undefined;
-    return sorted[0];
-  };
-  const links: MatchLink[] = [];
-  for (const candidate of candidates) {
-    if (bestFor(candidate.left.id) !== candidate || bestFor(candidate.right.id) !== candidate) continue;
-    const sameDirection = candidate.left.direction === candidate.right.direction;
-    links.push(
-      makeLink(
-        candidate.left,
-        candidate.right,
-        "paypal-bank-bridge",
-        sameDirection ? 94 : 98,
-        sameDirection ? "paypal-bank-same-payment" : "paypal-bank-countermovement",
-        sameDirection ? "PayPal-Händlerzahlung und identische Bankbuchung" : "PayPal-Kontobewegung und gleich hoher Bankgegenlauf",
-        true,
-      ),
-    );
-  }
-  return links;
+
+  return assignments.map((assignment) =>
+    makeLink(
+      assignment.bank,
+      assignment.paypal,
+      "paypal-bank-bridge",
+      assignment.structured ? 99 : 94,
+      "paypal-bank-global-assignment",
+      `Globale Eins-zu-eins-Zuordnung über Betrag, Richtung, Transaktionstyp und ${assignment.days} Tage Abstand`,
+      true,
+    ),
+  );
 }
 
 function bankInternalLinks(records: NormalizedRecord[]): MatchLink[] {
@@ -1091,6 +1367,54 @@ function signedPlatformAmount(record: NormalizedRecord): number {
   return 0;
 }
 
+function creditNoteRefundLinks(records: NormalizedRecord[]): MatchLink[] {
+  const creditNotes = records.filter(
+    (record) =>
+      active(record) &&
+      record.category === "document-income" &&
+      record.direction === "out",
+  );
+  const refunds = records.filter(
+    (record) =>
+      active(record) &&
+      PLATFORM_SOURCES.has(record.sourceKind) &&
+      record.category === "refund" &&
+      record.direction === "out",
+  );
+  const proposals: Array<{ document: NormalizedRecord; refund: NormalizedRecord; days: number }> = [];
+  for (const document of creditNotes) {
+    for (const refund of refunds) {
+      if (closestAmountDifference(document, refund) > 0.02 || counterpartySimilarity(document, refund) < 0.5) continue;
+      const days = reconciliationDateDifference(document, refund);
+      if (days !== undefined && days > 90) continue;
+      proposals.push({ document, refund, days: days ?? 0 });
+    }
+  }
+  const byDocument = new Map<string, typeof proposals>();
+  const byRefund = new Map<string, typeof proposals>();
+  for (const proposal of proposals) {
+    byDocument.set(proposal.document.id, [...(byDocument.get(proposal.document.id) ?? []), proposal]);
+    byRefund.set(proposal.refund.id, [...(byRefund.get(proposal.refund.id) ?? []), proposal]);
+  }
+  return proposals
+    .filter(
+      (proposal) =>
+        byDocument.get(proposal.document.id)?.length === 1 &&
+        byRefund.get(proposal.refund.id)?.length === 1,
+    )
+    .map((proposal) =>
+      makeLink(
+        proposal.document,
+        proposal.refund,
+        "document-order",
+        100,
+        "credit-note-platform-refund",
+        `Stornorechnung und Plattformerstattung centgenau · ${proposal.days} Tage Abstand`,
+        true,
+      ),
+    );
+}
+
 function documentAggregateLinks(records: NormalizedRecord[], dateTolerance: number): MatchLink[] {
   const documents = records.filter((record) => active(record) && DOCUMENT_CATEGORIES.has(record.category));
   const platformRecords = records.filter(
@@ -1114,7 +1438,7 @@ function documentAggregateLinks(records: NormalizedRecord[], dateTolerance: numb
       const nameSimilarity = evidence.reduce((best, record) => Math.max(best, counterpartySimilarity(document, record)), 0);
       const withinDate = evidence.some((record) => {
         const days = dateDifferenceDays(document.date, record.date);
-        return days === undefined || days <= dateTolerance;
+        return days === undefined || days <= Math.max(dateTolerance, 90);
       });
       if (nameSimilarity < 0.5 || !withinDate) continue;
       const netAmount = roundMoney(evidence.reduce((sum, record) => sum + signedPlatformAmount(record), 0));
@@ -1132,7 +1456,17 @@ function documentAggregateLinks(records: NormalizedRecord[], dateTolerance: numb
 function withheldFeeLinks(records: NormalizedRecord[]): MatchLink[] {
   const feeGroups = new Map<string, NormalizedRecord[]>();
   for (const record of records.filter(
-    (entry) => active(entry) && entry.date && (entry.category === "fee" || (entry.sourceKind === "ebay-ledger" && entry.category === "sale" && (entry.feeAmount ?? 0) > 0)),
+    (entry) =>
+      active(entry) &&
+      entry.date &&
+      (
+        entry.category === "fee" ||
+        (
+          entry.sourceKind === "ebay-ledger" &&
+          (entry.category === "sale" || entry.category === "refund") &&
+          Math.abs(entry.feeAmount ?? 0) > 0
+        )
+      ),
   )) {
     const platform = record.sourceKind === "etsy-statement" ? "etsy" : record.sourceKind === "ebay-ledger" ? "ebay" : "";
     if (!platform) continue;
@@ -1151,7 +1485,12 @@ function withheldFeeLinks(records: NormalizedRecord[]): MatchLink[] {
       .filter(([key]) => key.startsWith(`${platform}|`))
       .map(([, group]) => ({
         group,
-        total: roundMoney(group.reduce((sum, record) => sum + (record.category === "sale" ? record.feeAmount ?? 0 : record.amount), 0)),
+        total: roundMoney(group.reduce((sum, record) => {
+          if (record.sourceKind === "ebay-ledger" && (record.category === "sale" || record.category === "refund")) {
+            return sum + (record.feeAmount ?? 0);
+          }
+          return sum + (record.direction === "in" ? -record.amount : record.amount);
+        }, 0)),
         days: Math.min(...group.map((record) => dateDifferenceDays(document.date, record.date) ?? 0)),
       }))
       .filter((entry) => Math.abs(entry.total - document.amount) <= 0.02 && entry.days <= 45);
@@ -1239,6 +1578,7 @@ export function runMatching(records: NormalizedRecord[], dateTolerance = 20, amo
   const paypalRelated = paypalRelatedLinks(records);
   const contexts = paypalContext(records, paypalRelated);
   const document = documentLinks(records, dateTolerance, amountTolerance, contexts);
+  const etsyReviewed = etsyDocumentReviewLinks(records);
   const platformAggregate = documentAggregateLinks(records, dateTolerance);
   const foreignCurrency = foreignCurrencyMerchantLinks(records);
   const providerRefunds = providerRefundLinks(records);
@@ -1250,10 +1590,13 @@ export function runMatching(records: NormalizedRecord[], dateTolerance = 20, amo
     ...exactReferenceLinks(records),
     ...platformSettlementLinks(records),
     ...payoutLinks(records),
+    ...platformDebitLinks(records),
     ...walletLinks(records),
     ...providerPaymentLinks(records),
     ...providerRefunds,
     ...providerDocuments,
+    ...etsyReviewed.links,
+    ...creditNoteRefundLinks(records),
     ...internalTransferLinks(records),
     ...bankInternalLinks(records),
     ...platformAggregate,
@@ -1265,8 +1608,13 @@ export function runMatching(records: NormalizedRecord[], dateTolerance = 20, amo
   const yearlyExact = uniqueYearlyExactMerchantLinks(records, [...baseLinks, ...merchantVariants]);
   const links = deduplicateLinks([...baseLinks, ...merchantVariants, ...yearlyExact, ...groupedBankPaymentLinks(records, baseLinks, dateTolerance)]);
   const linkedPairs = new Set(links.map((link) => pairKey(link.fromId, link.toId, link.type)));
-  const candidates = document.candidates.filter((candidate) => !linkedPairs.has(pairKey(candidate.fromId, candidate.toId, candidate.type)));
-  return { links, candidates };
+  const adjacency = adjacencyFromLinks(links);
+  const candidates = document.candidates.filter(
+    (candidate) =>
+      !linkedPairs.has(pairKey(candidate.fromId, candidate.toId, candidate.type)) &&
+      !connectedIds(candidate.fromId, adjacency).has(candidate.toId),
+  );
+  return { links, candidates, reviews: etsyReviewed.reviews };
 }
 
 interface ReconciliationState {
@@ -1274,8 +1622,16 @@ interface ReconciliationState {
   open: Set<string>;
 }
 
-export function reconciliationAxes(records: NormalizedRecord[], links: MatchLink[]): Map<string, ReconciliationAxes> {
+export function reconciliationAxes(
+  records: NormalizedRecord[],
+  links: MatchLink[],
+  reviews: RecordReview[] = [],
+): Map<string, ReconciliationAxes> {
   const recordMap = new Map(records.map((record) => [record.id, record]));
+  const reviewsByRecord = new Map<string, RecordReview[]>();
+  for (const review of reviews) {
+    reviewsByRecord.set(review.recordId, [...(reviewsByRecord.get(review.recordId) ?? []), review]);
+  }
   const adjacency = adjacencyFromLinks(links);
   const paypalBalances = paypalBalancedCurrencies(records);
   const orderCustomers = new Set(
@@ -1402,6 +1758,21 @@ export function reconciliationAxes(records: NormalizedRecord[], links: MatchLink
       paymentEvidence = paymentEvidence === "open" ? "confirmed" : paymentEvidence;
       accountEvidence = accountEvidence === "open" ? "confirmed" : accountEvidence;
     }
+    const recordReviews = reviewsByRecord.get(record.id) ?? [];
+    const dataError = recordReviews.find((review) => review.status === "data-error");
+    const manualCleared = recordReviews.find((review) => review.status === "manual-cleared");
+    if (dataError) {
+      businessEvidence = "open";
+      businessReason = dataError.note;
+    }
+    if (manualCleared) {
+      if (businessEvidence === "open") businessEvidence = "confirmed";
+      if (paymentEvidence === "open") paymentEvidence = "confirmed";
+      if (accountEvidence === "open") accountEvidence = "confirmed";
+      businessReason = `Manuell geklärt: ${manualCleared.note}`;
+      paymentReason = `Manuell geklärt: ${manualCleared.note}`;
+      accountReason = `Manuell geklärt: ${manualCleared.note}`;
+    }
     result.set(record.id, {
       businessEvidence,
       paymentEvidence,
@@ -1414,8 +1785,12 @@ export function reconciliationAxes(records: NormalizedRecord[], links: MatchLink
   return result;
 }
 
-export function reconciliationState(records: NormalizedRecord[], links: MatchLink[]): ReconciliationState {
-  const axes = reconciliationAxes(records, links);
+export function reconciliationState(
+  records: NormalizedRecord[],
+  links: MatchLink[],
+  reviews: RecordReview[] = [],
+): ReconciliationState {
+  const axes = reconciliationAxes(records, links, reviews);
   const resolved = new Set<string>();
   const open = new Set<string>();
   for (const record of records) {
@@ -1423,18 +1798,35 @@ export function reconciliationState(records: NormalizedRecord[], links: MatchLin
     const recordAxes = axes.get(record.id);
     let isResolved =
       recordAxes?.paymentEvidence === "confirmed" &&
-      recordAxes.accountEvidence === "confirmed";
-    if (record.category === "order") {
-      isResolved = isResolved && recordAxes?.businessEvidence === "confirmed";
-    }
+      recordAxes.accountEvidence === "confirmed" &&
+      recordAxes.businessEvidence !== "open";
     (isResolved ? resolved : open).add(record.id);
   }
   return { resolved, open };
 }
 
-export function coverageSummary(records: NormalizedRecord[], links: MatchLink[]): CoverageSummary {
-  const state = reconciliationState(records, links);
-  const axes = reconciliationAxes(records, links);
+export function effectiveRecordReviews(reviews: RecordReview[]): Map<string, RecordReview> {
+  const result = new Map<string, RecordReview>();
+  for (const review of reviews) {
+    const current = result.get(review.recordId);
+    if (
+      !current ||
+      (!review.automatic && current.automatic) ||
+      (review.automatic === current.automatic && review.updatedAt > current.updatedAt)
+    ) {
+      result.set(review.recordId, review);
+    }
+  }
+  return result;
+}
+
+export function coverageSummary(
+  records: NormalizedRecord[],
+  links: MatchLink[],
+  reviews: RecordReview[] = [],
+): CoverageSummary {
+  const state = reconciliationState(records, links, reviews);
+  const axes = reconciliationAxes(records, links, reviews);
   const recordMap = new Map(records.map((record) => [record.id, record]));
   const adjacency = adjacencyFromLinks(links);
   const documents = records.filter((record) => DOCUMENT_CATEGORIES.has(record.category) && isReconciliationRecord(record));
@@ -1458,7 +1850,16 @@ export function coverageSummary(records: NormalizedRecord[], links: MatchLink[])
   }).length;
   const excludedOrders = orders.length - includedOrders.length;
   const resolvedOrders = includedOrders.filter((record) => state.resolved.has(record.id)).length;
-  const exceptions = documents.length - resolvedDocuments + payments.length - resolvedPayments + includedOrders.length - resolvedOrders;
+  const effectiveReviews = effectiveRecordReviews(reviews);
+  const manualClearedIds = new Set([...effectiveReviews.values()].filter((review) => review.status === "manual-cleared").map((review) => review.recordId));
+  const annotatedOpenIds = new Set([...effectiveReviews.values()].filter((review) => review.status === "open-note").map((review) => review.recordId));
+  const warningIds = new Set([...effectiveReviews.values()].filter((review) => review.status === "warning").map((review) => review.recordId));
+  const dataErrorIds = new Set([...effectiveReviews.values()].filter((review) => review.status === "data-error").map((review) => review.recordId));
+  const exceptionIds = new Set(state.open);
+  for (const review of effectiveReviews.values()) {
+    if (review.status !== "manual-cleared") exceptionIds.add(review.recordId);
+    else exceptionIds.delete(review.recordId);
+  }
   return {
     documents: { total: documents.length, resolved: resolvedDocuments, open: documents.length - resolvedDocuments },
     documentEvidence: { total: documents.length, resolved: confirmedBusiness, open: documents.length - confirmedBusiness },
@@ -1467,7 +1868,13 @@ export function coverageSummary(records: NormalizedRecord[], links: MatchLink[])
     payments: { total: payments.length, resolved: resolvedPayments, open: payments.length - resolvedPayments },
     bridges: { total: paypal.length, resolved: resolvedBridges, open: paypal.length - resolvedBridges },
     orders: { total: orders.length, resolved: resolvedOrders, excluded: excludedOrders, open: Math.max(0, includedOrders.length - resolvedOrders) },
-    exceptions: Math.max(0, exceptions),
+    reviews: {
+      manualCleared: manualClearedIds.size,
+      annotatedOpen: annotatedOpenIds.size,
+      warnings: warningIds.size,
+      dataErrors: dataErrorIds.size,
+    },
+    exceptions: exceptionIds.size,
   };
 }
 

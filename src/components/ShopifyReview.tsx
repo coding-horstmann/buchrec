@@ -10,13 +10,18 @@ interface ShopifyReviewProps {
 
 export function ShopifyReview({ records, rules, onApply }: ShopifyReviewProps) {
   const groups = useMemo(() => {
-    const map = new Map<string, Map<string, { count: number; total: number }>>();
+    const map = new Map<string, Map<string, { count: number; total: number; allTest: boolean; zeroOnly: boolean }>>();
     records.filter((record) => record.sourceKind === "shopify-orders").forEach((record) => {
       const shop = record.shop || "Unbekannter Shopify-Shop";
       const customer = record.counterparty || "Unbekannter Kunde";
       const customers = map.get(shop) ?? new Map();
-      const current = customers.get(customer) ?? { count: 0, total: 0 };
-      customers.set(customer, { count: current.count + 1, total: current.total + record.amount });
+      const current = customers.get(customer) ?? { count: 0, total: 0, allTest: true, zeroOnly: true };
+      customers.set(customer, {
+        count: current.count + 1,
+        total: current.total + record.amount,
+        allTest: current.allTest && record.disposition === "test",
+        zeroOnly: current.zeroOnly && record.amount === 0,
+      });
       map.set(shop, customers);
     });
     return map;
@@ -38,7 +43,10 @@ export function ShopifyReview({ records, rules, onApply }: ShopifyReviewProps) {
           <div className="customer-grid">
             {[...customers].map(([customer, summary]) => {
               const checked = (selected[shop] ?? []).includes(customer);
-              const automaticallyTest = Math.abs(summary.total) < 0.005;
+              const automaticallyTest = summary.allTest;
+              const testLabel = summary.zeroOnly
+                ? "Automatisch als 0-Euro-Test ausgeschlossen"
+                : "Automatisch als Testidentität ausgeschlossen";
               return (
                 <label className={`customer-option ${checked && !automaticallyTest ? "selected" : ""} ${automaticallyTest ? "auto-test" : ""}`} key={customer}>
                   <input type="checkbox" disabled={automaticallyTest} checked={automaticallyTest ? false : checked} onChange={() => setSelected((current) => {
@@ -46,7 +54,7 @@ export function ShopifyReview({ records, rules, onApply }: ShopifyReviewProps) {
                     return { ...current, [shop]: checked ? values.filter((value) => value !== customer) : [...values, customer] };
                   })} />
                   <span className="custom-check">{checked && !automaticallyTest && <Check size={14} />}</span>
-                  <span><strong>{customer}</strong><small>{automaticallyTest ? "Automatisch als 0-Euro-Test ausgeschlossen" : `${summary.count} Bestellung${summary.count === 1 ? "" : "en"} · ${summary.total.toLocaleString("de-DE", { style: "currency", currency: "EUR" })}`}</small></span>
+                  <span><strong>{customer}</strong><small>{automaticallyTest ? testLabel : `${summary.count} Bestellung${summary.count === 1 ? "" : "en"} · ${summary.total.toLocaleString("de-DE", { style: "currency", currency: "EUR" })}`}</small></span>
                 </label>
               );
             })}

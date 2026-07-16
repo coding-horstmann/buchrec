@@ -2,9 +2,13 @@ import type {
   MatchLink,
   NormalizedRecord,
   PlatformPeriodSummary,
+  PlatformReconciliation,
+  RecordReview,
   SettlementBatch,
+  SingleReconciliationSummary,
 } from "../types";
 import { makeId, normalizeText, roundMoney } from "./normalize";
+import { reconciliationState } from "./matching";
 
 interface PeriodAccumulator {
   account: string;
@@ -130,11 +134,20 @@ function addProvider(acc: PeriodAccumulator, record: NormalizedRecord): void {
 function addMarketplace(acc: PeriodAccumulator, record: NormalizedRecord): void {
   if (record.category === "order" || record.category === "sale") {
     acc.sellerRevenue = roundMoney(acc.sellerRevenue + record.amount);
+    acc.fees = roundMoney(acc.fees + (record.feeAmount ?? 0));
   }
-  if (record.category === "fee") acc.fees = roundMoney(acc.fees + record.amount);
-  if (record.category === "refund") acc.refunds = roundMoney(acc.refunds + record.amount);
+  if (record.category === "fee") {
+    acc.fees = roundMoney(acc.fees + (record.direction === "in" ? -record.amount : record.amount));
+  }
+  if (record.category === "refund") {
+    acc.refunds = roundMoney(acc.refunds + record.amount);
+    acc.fees = roundMoney(acc.fees + (record.feeAmount ?? 0));
+  }
+  if (record.category === "transfer") {
+    acc.inflows = roundMoney(acc.inflows + (record.direction === "out" ? -record.amount : record.amount));
+  }
   if (record.category === "payout") acc.payouts = roundMoney(acc.payouts + record.amount);
-  acc.movement = roundMoney(acc.sellerRevenue - acc.fees - acc.refunds - acc.payouts);
+  acc.movement = roundMoney(acc.sellerRevenue + acc.inflows - acc.fees - acc.refunds - acc.payouts);
 }
 
 function addRoyalty(acc: PeriodAccumulator, record: NormalizedRecord): void {
@@ -281,6 +294,285 @@ export function buildPlatformSummaries(
     .sort((left, right) => left.account.localeCompare(right.account) || right.period.localeCompare(left.period) || left.currency.localeCompare(right.currency));
 }
 
+function linkAdjacency(links: MatchLink[]): Map<string, Set<string>> {
+  const adjacency = new Map<string, Set<string>>();
+  for (const link of links.filter((entry) => !entry.rejected)) {
+    adjacency.set(link.fromId, new Set([...(adjacency.get(link.fromId) ?? []), link.toId]));
+    adjacency.set(link.toId, new Set([...(adjacency.get(link.toId) ?? []), link.fromId]));
+  }
+  return adjacency;
+}
+
+function connected(startId: string, adjacency: Map<string, Set<string>>): Set<string> {
+  const result = new Set([startId]);
+  const pending = [startId];
+  while (pending.length) {
+    const current = pending.shift()!;
+    for (const next of adjacency.get(current) ?? []) {
+      if (result.has(next)) continue;
+      result.add(next);
+      pending.push(next);
+    }
+  }
+  return result;
+}
+
+function signedDocument(record: NormalizedRecord): number {
+  return record.direction === "out" ? -record.amount : record.amount;
+}
+
+function controlAxis(
+  label: string,
+  expected: number,
+  actual: number,
+  detail: string,
+  carryAllowed = false,
+) {
+  const difference = roundMoney(actual - expected);
+  return {
+    label,
+    expected: roundMoney(expected),
+    actual: roundMoney(actual),
+    difference,
+    state: Math.abs(difference) <= 0.02 ? "confirmed" as const : carryAllowed ? "warning" as const : "open" as const,
+    detail,
+  };
+}
+
+function platformBankTotal(
+  payouts: NormalizedRecord[],
+  records: NormalizedRecord[],
+  adjacency: Map<string, Set<string>>,
+): number {
+  const recordMap = new Map(records.map((record) => [record.id, record]));
+  const bankIds = new Set<string>();
+  for (const payout of payouts) {
+    for (const id of connected(payout.id, adjacency)) {
+      const record = recordMap.get(id);
+      if (record && (record.sourceKind === "bank-fyrst" || record.sourceKind === "bank-n26")) {
+        bankIds.add(id);
+      }
+    }
+  }
+  return roundMoney([...bankIds].reduce((sum, id) => {
+    const record = recordMap.get(id);
+    if (!record) return sum;
+    return sum + (record.direction === "out" ? -record.amount : record.amount);
+  }, 0));
+}
+
+function connectedDocuments(
+  platformRecords: NormalizedRecord[],
+  records: NormalizedRecord[],
+  adjacency: Map<string, Set<string>>,
+  category: "document-income" | "document-expense",
+): NormalizedRecord[] {
+  const recordMap = new Map(records.map((record) => [record.id, record]));
+  const ids = new Set<string>();
+  for (const platformRecord of platformRecords) {
+    for (const id of connected(platformRecord.id, adjacency)) {
+      if (recordMap.get(id)?.category === category) ids.add(id);
+    }
+  }
+  return [...ids].map((id) => recordMap.get(id)!).filter(Boolean);
+}
+
+export function buildPlatformReconciliations(
+  records: NormalizedRecord[],
+  links: MatchLink[],
+  year: number,
+): PlatformReconciliation[] {
+  const activeRecords = records.filter(
+    (record) =>
+      (record.disposition === "active" || record.disposition === "resolved") &&
+      record.date?.startsWith(`${year}-`),
+  );
+  const adjacency = linkAdjacency(links);
+  const summaries = buildPlatformSummaries(records, links, year);
+  const result: PlatformReconciliation[] = [];
+
+  const etsyShops = new Set(
+    activeRecords
+      .filter((record) => record.sourceKind === "etsy-sales" && record.shop)
+      .map((record) => record.shop!),
+  );
+  for (const shop of etsyShops) {
+    const orders = activeRecords.filter(
+      (record) => record.sourceKind === "etsy-sales" && record.category === "order" && normalizeText(record.shop) === normalizeText(shop),
+    );
+    const sellerRevenue = roundMoney(orders.reduce((sum, record) => sum + record.amount, 0));
+    const buyerPayments = roundMoney(orders.reduce((sum, record) => {
+      const listing = Number(record.metadata.listingAmount);
+      return sum + (Number.isFinite(listing) ? listing : record.amount);
+    }, 0));
+    const marketplaceTax = roundMoney(buyerPayments - sellerRevenue);
+    const statement = summaries.find(
+      (summary) => summary.account === `Etsy · ${shop}` && summary.period === String(year) && summary.currency === "EUR",
+    );
+    const platformRecords = activeRecords.filter(
+      (record) => record.sourceKind.startsWith("etsy") && normalizeText(record.shop) === normalizeText(shop),
+    );
+    const salesDocuments = connectedDocuments(platformRecords, activeRecords, adjacency, "document-income");
+    const feeDocuments = connectedDocuments(platformRecords, activeRecords, adjacency, "document-expense");
+    const accountableSales = roundMoney(salesDocuments.reduce((sum, record) => sum + signedDocument(record), 0));
+    const accountableFees = roundMoney(feeDocuments.reduce((sum, record) => sum + record.amount, 0));
+    const fees = statement?.fees ?? 0;
+    const refunds = statement?.refunds ?? 0;
+    const payouts = statement?.payouts ?? 0;
+    const carry = statement?.carry ?? 0;
+    const adjustments = roundMoney(carry - (sellerRevenue - fees - refunds - payouts));
+    const payoutRecords = platformRecords.filter((record) => record.category === "payout");
+    const bankTotal = platformBankTotal(payoutRecords, activeRecords, adjacency);
+    result.push({
+      id: makeId("platform-control", "etsy", shop, year),
+      platform: "Etsy",
+      shop,
+      period: String(year),
+      currency: "EUR",
+      documentAxis: controlAxis("Accountable ↔ Etsy-Verkäufe", sellerRevenue, accountableSales, "Verkäuferumsatz gegen Ausgangsrechnungen"),
+      feeDocumentAxis: controlAxis("Accountable ↔ Etsy-Gebühren", fees, accountableFees, "Etsy-Gebühren gegen Eingangsrechnungen"),
+      platformAxis: controlAxis("Etsy-Zahlungskonto", 0, carry, "Rechnerischer Periodenübertrag; Jahresrand kann den Betrag erklären", true),
+      paymentAxis: controlAxis("Etsy-Auszahlungen ↔ Bank", payouts, bankTotal, "Auszahlungen bis FYRST/N26 verfolgt"),
+      sellerRevenue,
+      buyerPayments,
+      marketplaceTax,
+      feeCharges: fees,
+      fees,
+      feeCorrections: 0,
+      refunds,
+      adjustments,
+      payouts,
+      carry,
+    });
+  }
+
+  const ebay = activeRecords.filter((record) => record.sourceKind === "ebay-ledger");
+  if (ebay.length) {
+    const sales = ebay.filter((record) => record.category === "sale");
+    const refunds = ebay.filter((record) => record.category === "refund");
+    const payouts = ebay.filter((record) => record.category === "payout");
+    const transfers = ebay.filter((record) => record.category === "transfer");
+    const sellerRevenue = roundMoney(
+      sales.reduce((sum, record) => sum + record.amount, 0) -
+      refunds.reduce((sum, record) => sum + record.amount, 0),
+    );
+    const grossFees = roundMoney(ebay.reduce((sum, record) => {
+      if ((record.category === "sale" || record.category === "refund") && (record.feeAmount ?? 0) > 0) {
+        return sum + (record.feeAmount ?? 0);
+      }
+      if (record.category === "fee" && record.direction === "out") return sum + record.amount;
+      return sum;
+    }, 0));
+    const feeCorrections = roundMoney(ebay.reduce((sum, record) => {
+      if ((record.category === "sale" || record.category === "refund") && (record.feeAmount ?? 0) < 0) {
+        return sum + Math.abs(record.feeAmount ?? 0);
+      }
+      if (record.category === "fee" && record.direction === "in") return sum + record.amount;
+      return sum;
+    }, 0));
+    const fees = roundMoney(grossFees - feeCorrections);
+    const payoutTotal = roundMoney(payouts.reduce((sum, record) => sum + record.amount, 0));
+    const platformRecords = activeRecords.filter(
+      (record) => record.sourceKind === "ebay-ledger" || record.sourceKind === "ebay-orders",
+    );
+    const salesDocuments = connectedDocuments(platformRecords, activeRecords, adjacency, "document-income");
+    const feeDocuments = [
+      ...new Map([
+        ...connectedDocuments(platformRecords, activeRecords, adjacency, "document-expense"),
+        ...activeRecords.filter(
+          (record) =>
+            record.category === "document-expense" &&
+            normalizeText(record.counterparty).includes("ebay"),
+        ),
+      ].map((record) => [record.id, record])).values(),
+    ];
+    const accountableSales = roundMoney(salesDocuments.reduce((sum, record) => sum + signedDocument(record), 0));
+    const accountableFees = roundMoney(feeDocuments.reduce((sum, record) => sum + record.amount, 0));
+    const adjustments = roundMoney(transfers.reduce((sum, record) => sum + (record.direction === "out" ? -record.amount : record.amount), 0));
+    const carry = roundMoney(sellerRevenue + adjustments - fees - payoutTotal);
+    const bankTotal = platformBankTotal([...payouts, ...transfers], activeRecords, adjacency);
+    const expectedBank = roundMoney(payoutTotal - adjustments);
+    result.push({
+      id: makeId("platform-control", "ebay", year),
+      platform: "eBay",
+      period: String(year),
+      currency: "EUR",
+      documentAxis: controlAxis("Accountable ↔ eBay-Verkäufe", sellerRevenue, accountableSales, "Verkäufe abzüglich Erstattungen gegen Ausgangsrechnungen"),
+      feeDocumentAxis: controlAxis("Accountable ↔ eBay-Gebühren", fees, accountableFees, "Nettogebühren gegen Eingangsrechnungen; Bruttobelastungen und Korrekturen bleiben separat sichtbar"),
+      platformAxis: controlAxis("eBay-Zahlungskonto", 0, carry, "Verkäufe minus Erstattungen, Gebühren und Auszahlungen", true),
+      paymentAxis: controlAxis("eBay-Auszahlungen/Belastungen ↔ Bank", expectedBank, bankTotal, "Auszahlungen und Rückerstattungszuführungen bis FYRST/N26 verfolgt"),
+      sellerRevenue,
+      buyerPayments: roundMoney(sales.reduce((sum, record) => sum + record.amount, 0)),
+      marketplaceTax: 0,
+      feeCharges: grossFees,
+      fees,
+      feeCorrections,
+      refunds: roundMoney(refunds.reduce((sum, record) => sum + record.amount, 0)),
+      adjustments,
+      payouts: payoutTotal,
+      carry,
+    });
+  }
+  return result;
+}
+
+const SINGLE_ACCOUNTS = [
+  { label: "Gelato", patterns: ["gelato"] },
+  { label: "Printful", patterns: ["printful"] },
+  { label: "Printler", patterns: ["printler"] },
+  { label: "Art Heroes", patterns: ["art heroes", "werk aan de muur", "we make it work"] },
+  { label: "Redbubble", patterns: ["redbubble"] },
+  { label: "Europosters", patterns: ["europosters"] },
+  { label: "Albin Michel", patterns: ["albin michel", "editions albin michel"] },
+  { label: "Google", patterns: ["google"] },
+  { label: "Cursor", patterns: ["cursor"] },
+  { label: "Faktorino", patterns: ["faktorino", "lights more"] },
+];
+
+export function buildSingleReconciliationSummaries(
+  records: NormalizedRecord[],
+  links: MatchLink[],
+  reviews: RecordReview[] = [],
+): SingleReconciliationSummary[] {
+  const adjacency = linkAdjacency(links);
+  const recordMap = new Map(records.map((record) => [record.id, record]));
+  const state = reconciliationState(records, links, reviews);
+  const accounts = [...SINGLE_ACCOUNTS];
+  for (const shop of new Set(records.filter((record) => record.sourceKind === "shopify-orders" && record.shop).map((record) => record.shop!))) {
+    accounts.push({ label: `Shopify · ${shop}`, patterns: [normalizeText(shop)] });
+  }
+  return accounts.flatMap((account) => {
+    const anchors = records.filter((record) => {
+      const text = normalizeText(`${record.counterparty} ${record.description} ${record.shop ?? ""}`);
+      return account.patterns.some((pattern) => text.includes(normalizeText(pattern))) &&
+        (record.category.startsWith("document") || record.category === "order");
+    });
+    if (!anchors.length) return [];
+    const componentIds = new Set<string>();
+    for (const anchor of anchors) {
+      for (const id of connected(anchor.id, adjacency)) componentIds.add(id);
+    }
+    const component = [...componentIds].map((id) => recordMap.get(id)).filter((record): record is NormalizedRecord => Boolean(record));
+    const documents = anchors.filter((record) => record.category.startsWith("document"));
+    const payments = component.filter(
+      (record) =>
+        record.sourceKind === "paypal-business" ||
+        record.sourceKind === "bank-fyrst" ||
+        record.sourceKind === "bank-n26",
+    );
+    return [{
+      id: makeId("single-summary", account.label),
+      counterparty: account.label,
+      documents: documents.length,
+      documentAmount: roundMoney(documents.reduce((sum, record) => sum + signedDocument(record), 0)),
+      payments: payments.length,
+      paymentAmount: roundMoney(payments.reduce((sum, record) => sum + (record.direction === "out" ? -record.amount : record.amount), 0)),
+      resolved: documents.filter((record) => state.resolved.has(record.id)).length,
+      open: documents.filter((record) => state.open.has(record.id)).length,
+    }];
+  });
+}
+
 function batchAccount(anchor: NormalizedRecord): string {
   if (anchor.sourceKind === "paypal-business") return "PayPal";
   if (anchor.sourceKind.startsWith("etsy")) return `Etsy · ${anchor.shop ?? "nicht zugeordnet"}`;
@@ -327,5 +619,7 @@ export function buildSettlementBatches(records: NormalizedRecord[], links: Match
       rule,
       verified: batchLinks.every((link) => link.confidence >= 98),
     };
-  }).sort((left, right) => (right.date ?? "").localeCompare(left.date ?? "") || left.account.localeCompare(right.account));
+  })
+    .filter((batch) => /^(paypal|etsy|ebay)/.test(normalizeText(batch.account)))
+    .sort((left, right) => (right.date ?? "").localeCompare(left.date ?? "") || left.account.localeCompare(right.account));
 }

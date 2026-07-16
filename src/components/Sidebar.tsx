@@ -1,6 +1,6 @@
-import { Database, FileSpreadsheet, Landmark, LayoutDashboard, Link2, Settings2, TriangleAlert } from "lucide-react";
+import { Database, FileSpreadsheet, Layers3, LayoutDashboard, Link2, Settings2, TriangleAlert } from "lucide-react";
 
-export type ViewKey = "overview" | "sources" | "matches" | "accounts" | "exceptions" | "records" | "rules";
+export type ViewKey = "overview" | "sources" | "single" | "settlements" | "exceptions" | "records" | "rules";
 
 interface SidebarProps {
   active: ViewKey;
@@ -11,8 +11,8 @@ interface SidebarProps {
 const items = [
   { key: "overview" as const, label: "Übersicht", icon: LayoutDashboard },
   { key: "sources" as const, label: "Dateien", icon: FileSpreadsheet, count: "sources" as const },
-  { key: "matches" as const, label: "Zuordnungen", icon: Link2, count: "matches" as const },
-  { key: "accounts" as const, label: "Konten & Sammel", icon: Landmark },
+  { key: "single" as const, label: "Einzelabgleich", icon: Link2, count: "matches" as const },
+  { key: "settlements" as const, label: "Plattformabrechnungen", icon: Layers3 },
   { key: "exceptions" as const, label: "Ausnahmen", icon: TriangleAlert, count: "exceptions" as const },
   { key: "records" as const, label: "Alle Daten", icon: Database, count: "records" as const },
   { key: "rules" as const, label: "Regeln", icon: Settings2 },
@@ -37,13 +37,6 @@ export function Sidebar({ active, counts, onChange }: SidebarProps) {
           );
         })}
       </nav>
-      <div className="sidebar-note">
-        <span className="local-dot" />
-        <div>
-          <strong>Browser-Speicher</strong>
-          <small>Keine Finanzdaten auf Railway</small>
-        </div>
-      </div>
     </aside>
   );
 }

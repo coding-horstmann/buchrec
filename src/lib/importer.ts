@@ -468,6 +468,8 @@ function parseEtsySoldOrders(source: SourceImport, rows: RowObject[], map: Map<s
     const marketplaceTax = roundMoney(Math.max(0, (hasAdjustment ? adjustedTotal : orderTotal) - sellerRevenue));
     const base = recordBase(source, source.headerRow + index + 1, "order-detail", "in", sellerRevenue);
     const buyer = String(value(row, map, "Full Name", "Buyer") ?? "").trim();
+    const shippingCompany = String(value(row, map, "Street 2") ?? "").trim();
+    const buyerUserId = String(value(row, map, "Buyer User ID") ?? "").trim();
     return [{
       ...base,
       date: parseDate(value(row, map, "Sale Date"), "mdy"),
@@ -476,11 +478,13 @@ function parseEtsySoldOrders(source: SourceImport, rows: RowObject[], map: Map<s
       currency: String(value(row, map, "Currency") || "EUR"),
       counterparty: buyer,
       reference: orderId,
-      relatedReferences: referenceTokens(orderId, value(row, map, "Buyer User ID"), value(row, map, "SKU")),
+      relatedReferences: referenceTokens(orderId, buyerUserId, value(row, map, "SKU")),
       description: `Etsy Sold Order ${orderId}`,
       metadata: compactMetadata({
         orderId,
         buyer,
+        buyerUserId,
+        shippingCompany,
         orderValue,
         discount,
         shippingDiscount,
@@ -603,13 +607,22 @@ function parseEbayLedger(source: SourceImport, rows: RowObject[], map: Map<strin
   return rows.flatMap((row, index) => {
     const type = String(value(row, map, "Typ") ?? "");
     const normalizedType = normalizeText(type);
+    const gross = parseAmount(value(row, map, "Transaktionsbetrag (inkl. Kosten)"));
+    const embeddedFee = roundMoney(-[
+      "Fixer Anteil der Verkaufsprovision",
+      "Variabler Anteil der Verkaufsprovision",
+      "Gebühr für gesetzliche Betriebskosten",
+      "Gebühr für sehr hohe Quote an „nicht wie beschriebenen Artikeln“",
+      "Gebühr für unterdurchschnittlichen Servicestatus",
+      "Internationale Gebühr",
+    ].reduce((sum, header) => sum + parseAmount(value(row, map, header)), 0));
     let category: RecordCategory = "unknown";
     let direction: Direction = "neutral";
     if (normalizedType === "bestellung") { category = "sale"; direction = "in"; }
     else if (normalizedType === "auszahlung") { category = "payout"; direction = "in"; }
     else if (normalizedType.includes("ruckerstattung")) { category = "refund"; direction = "out"; }
-    else if (normalizedType.includes("gebuhr") || normalizedType === "belastung") { category = "fee"; direction = "out"; }
-    const gross = parseAmount(value(row, map, "Transaktionsbetrag (inkl. Kosten)"));
+    else if (normalizedType.includes("gebuhr")) { category = "fee"; direction = gross > 0 ? "in" : "out"; }
+    else if (normalizedType === "belastung") { category = "transfer"; direction = "in"; }
     const settlement = parseAmount(value(row, map, "Betrag abzügl. Kosten"));
     const amount = Math.abs(category === "payout" ? settlement : gross || settlement);
     const orderId = String(value(row, map, "Bestellnummer") ?? "");
@@ -623,7 +636,7 @@ function parseEbayLedger(source: SourceImport, rows: RowObject[], map: Map<strin
         "german-named",
       ),
       settlementAmount: Math.abs(settlement),
-      feeAmount: category === "sale" ? roundMoney(Math.abs(gross) - Math.abs(settlement)) : undefined,
+      feeAmount: category === "sale" || category === "refund" ? embeddedFee : undefined,
       currency: String(value(row, map, "Transaktionswährung", "Auszahlungswährung") || "EUR"),
       counterparty: category === "payout" ? "eBay" : String(value(row, map, "Name des Käufers") || "eBay"),
       reference: category === "payout" ? payoutId || String(value(row, map, "Referenznummer") || "") : orderId || String(value(row, map, "Referenznummer") || ""),
@@ -636,6 +649,7 @@ function parseEbayLedger(source: SourceImport, rows: RowObject[], map: Map<strin
         payoutStatus: value(row, map, "Auszahlungsstatus"),
         ebayCollectedTax: value(row, map, "Von eBay eingezogene Steuer"),
         sellerCollectedTax: value(row, map, "Vom Verkäufer eingezogene Steuer"),
+        embeddedFee,
       }),
     }];
   });
@@ -823,7 +837,7 @@ function buildSource(
 ): SourceImport {
   const fingerprint = makeId(kind, ...headers.map(normalizeHeader).sort());
   return {
-    id: makeId(file.name, file.size, table.sheetName, fingerprint),
+    id: makeId(file.name, contentHash, table.sheetName, fingerprint),
     fileName: file.name,
     fileSize: file.size,
     fingerprint,

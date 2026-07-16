@@ -169,4 +169,27 @@ describe("file importer", () => {
     expect(result.records[0]).toMatchObject({ disposition: "active", dispositionReason: "Interne Überweisung FYRST → N26" });
     expect(result.records[1]).toMatchObject({ disposition: "private", dispositionReason: "Privatentnahme des Inhabers" });
   });
+
+  it("imports eBay fees, refund corrections and bank-funded debits with their economic sign", async () => {
+    const file = csvFile(
+      "ebay-ledger.csv",
+      [
+        "Datum der Transaktionserstellung;Typ;Bestellnummer;Auszahlung Nr.;Betrag abzÃ¼gl. Kosten;Transaktionsbetrag (inkl. Kosten);Fixer Anteil der Verkaufsprovision;Variabler Anteil der Verkaufsprovision;Beschreibung",
+        "01.10.2025;Bestellung;11-11111-11111;P-1;85,00;100,00;-5,00;-10,00;Bestellung",
+        "02.10.2025;Rückerstattung;11-11111-11111;P-2;-17,00;-20,00;1,00;2,00;Rückerstattung",
+        "03.10.2025;Andere Gebühr;11-11111-11111;P-2;-2,00;-2,00;0;0;Gebühr",
+        "04.10.2025;Andere Gebühr;11-11111-11111;P-2;2,00;2,00;0;0;Gebührenkorrektur",
+        "05.10.2025;Belastung;;P-2;20,00;20,00;0;0;Belastung für Rückerstattungskosten",
+      ].join("\n"),
+    );
+    const result = await parseImportFile(file);
+    expect(result.sources[0].kind).toBe("ebay-ledger");
+    expect(result.records).toEqual(expect.arrayContaining([
+      expect.objectContaining({ category: "sale", direction: "in", feeAmount: 15 }),
+      expect.objectContaining({ category: "refund", direction: "out", feeAmount: -3 }),
+      expect.objectContaining({ category: "fee", direction: "out", amount: 2 }),
+      expect.objectContaining({ category: "fee", direction: "in", amount: 2 }),
+      expect.objectContaining({ category: "transfer", direction: "in", amount: 20 }),
+    ]));
+  });
 });

@@ -36,6 +36,7 @@ export type RecordCategory =
 
 export type Direction = "in" | "out" | "neutral";
 export type Disposition = "active" | "test" | "private" | "ignored" | "resolved";
+export type ReviewStatus = "manual-cleared" | "open-note" | "warning" | "data-error";
 
 export interface SourceImport {
   id: string;
@@ -115,6 +116,16 @@ export interface MatchCandidate extends MatchLink {
   automatic: false;
 }
 
+export interface RecordReview {
+  id: string;
+  recordId: string;
+  status: ReviewStatus;
+  note: string;
+  automatic: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ShopifyRule {
   shop: string;
   mode: "zero-only" | "allow-list";
@@ -139,6 +150,7 @@ export interface BuchrecProject {
   records: NormalizedRecord[];
   links: MatchLink[];
   candidates: MatchCandidate[];
+  reviews: RecordReview[];
 }
 
 export interface ParsedFileResult {
@@ -149,6 +161,7 @@ export interface ParsedFileResult {
 export interface MatchResult {
   links: MatchLink[];
   candidates: MatchCandidate[];
+  reviews: RecordReview[];
 }
 
 export interface CoverageSummary {
@@ -159,6 +172,7 @@ export interface CoverageSummary {
   payments: { total: number; resolved: number; open: number };
   bridges: { total: number; resolved: number; open: number };
   orders: { total: number; resolved: number; excluded: number; open: number };
+  reviews: { manualCleared: number; annotatedOpen: number; warnings: number; dataErrors: number };
   exceptions: number;
 }
 
@@ -207,6 +221,50 @@ export interface PlatformPeriodSummary {
   carry: number;
   status: AccountControlStatus;
   note: string;
+}
+
+export type ControlState = "confirmed" | "warning" | "open";
+
+export interface PlatformControlAxis {
+  label: string;
+  expected: number;
+  actual: number;
+  difference: number;
+  state: ControlState;
+  detail: string;
+}
+
+export interface PlatformReconciliation {
+  id: string;
+  platform: string;
+  shop?: string;
+  period: string;
+  currency: string;
+  documentAxis: PlatformControlAxis;
+  feeDocumentAxis?: PlatformControlAxis;
+  platformAxis: PlatformControlAxis;
+  paymentAxis: PlatformControlAxis;
+  sellerRevenue: number;
+  buyerPayments: number;
+  marketplaceTax: number;
+  feeCharges: number;
+  fees: number;
+  feeCorrections: number;
+  refunds: number;
+  adjustments: number;
+  payouts: number;
+  carry: number;
+}
+
+export interface SingleReconciliationSummary {
+  id: string;
+  counterparty: string;
+  documents: number;
+  documentAmount: number;
+  payments: number;
+  paymentAmount: number;
+  resolved: number;
+  open: number;
 }
 
 export const SOURCE_LABELS: Record<SourceKind, string> = {

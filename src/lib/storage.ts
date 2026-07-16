@@ -1,4 +1,5 @@
 import type { BuchrecProject } from "../types";
+import { upgradeProject } from "./project";
 
 const DATABASE = "buchrec-browser-only";
 const STORE = "projects";
@@ -35,7 +36,7 @@ export async function loadProject(): Promise<BuchrecProject | undefined> {
     request.onerror = () => reject(request.error);
   });
   db.close();
-  return project;
+  return project ? upgradeProject(project) : undefined;
 }
 
 export async function clearProject(): Promise<void> {
@@ -64,5 +65,5 @@ export async function readProjectFile(file: File): Promise<BuchrecProject> {
   if (parsed.version !== 1 || !Array.isArray(parsed.sources) || !Array.isArray(parsed.records)) {
     throw new Error("Die Projektdatei hat kein unterstütztes buchrec-Format.");
   }
-  return parsed;
+  return upgradeProject(parsed);
 }

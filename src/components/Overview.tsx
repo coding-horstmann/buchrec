@@ -45,7 +45,7 @@ export function Overview({ coverage, hasData, candidateCount, sourceCount, linkC
   return (
     <div className="view-stack">
       <section className="page-heading">
-        <div><span className="eyebrow">Prüfstand</span><h1>Wie vollständig ist der Abgleich?</h1></div>
+        <div><h1>Wie vollständig ist der Abgleich?</h1></div>
         <button className="button button-secondary" onClick={() => onNavigate("exceptions")}>
           Offene Fälle prüfen <ArrowRight size={17} />
         </button>
@@ -74,11 +74,13 @@ export function Overview({ coverage, hasData, candidateCount, sourceCount, linkC
           <div className="status-row"><CheckCircle2 size={18} /><span>Erkannte Quellen</span><strong>{sourceCount.toLocaleString("de-DE")}</strong></div>
           <div className="status-row"><CheckCircle2 size={18} /><span>Bestätigte Zuordnungen</span><strong>{linkCount.toLocaleString("de-DE")}</strong></div>
           <div className="status-row candidate"><TriangleAlert size={18} /><span>Vorschläge zur Prüfung</span><strong>{candidateCount.toLocaleString("de-DE")}</strong></div>
+          <div className={`status-row ${coverage.reviews.warnings ? "candidate" : ""}`}><TriangleAlert size={18} /><span>Warnungen</span><strong>{coverage.reviews.warnings.toLocaleString("de-DE")}</strong></div>
+          <div className={`status-row ${coverage.reviews.dataErrors ? "candidate" : ""}`}><TriangleAlert size={18} /><span>Datenfehler</span><strong>{coverage.reviews.dataErrors.toLocaleString("de-DE")}</strong></div>
+          <div className="status-row"><CheckCircle2 size={18} /><span>Manuell geklärt</span><strong>{coverage.reviews.manualCleared.toLocaleString("de-DE")}</strong></div>
           <div className={`status-row ${warningCount ? "candidate" : ""}`}><TriangleAlert size={18} /><span>Importwarnungen</span><strong>{warningCount.toLocaleString("de-DE")}</strong></div>
-          <button className="button button-ghost full-width" onClick={() => onNavigate("matches")}>Zuordnungen ansehen</button>
+          <button className="button button-ghost full-width" onClick={() => onNavigate("single")}>Einzelabgleich öffnen</button>
         </article>
       </section>
-      <p className="audit-disclaimer">„Geklärt“ bedeutet technisch nachvollziehbar zugeordnet. Die Anwendung ersetzt keine steuerliche Prüfung durch einen Steuerberater.</p>
     </div>
   );
 }

@@ -231,4 +231,83 @@ describe("matching", () => {
     });
     expect(coverageSummary(records, result.links).documents.open).toBe(0);
   });
+
+  it("assigns repeated PayPal and bank amounts globally one to one", () => {
+    const records = [
+      record({ id: "paypal-1", sourceKind: "paypal-business", category: "cash-movement", direction: "out", date: "2025-12-15", amount: 83.49, counterparty: "Gelato ASA" }),
+      record({ id: "paypal-2", sourceKind: "paypal-business", category: "cash-movement", direction: "out", date: "2025-12-17", amount: 83.49, counterparty: "Gelato ASA" }),
+      record({ id: "bank-1", sourceKind: "bank-fyrst", category: "cash-movement", direction: "out", date: "2025-12-15", amount: 83.49, counterparty: "PayPal", description: "Gelato ASA" }),
+      record({ id: "bank-2", sourceKind: "bank-fyrst", category: "cash-movement", direction: "out", date: "2025-12-17", amount: 83.49, counterparty: "PayPal", description: "Gelato ASA" }),
+    ];
+    const links = runMatching(records).links.filter((link) => link.rule === "paypal-bank-global-assignment");
+    expect(links).toHaveLength(2);
+    expect(links.map((link) => [link.fromId, link.toId].sort())).toEqual(expect.arrayContaining([
+      ["bank-1", "paypal-1"],
+      ["bank-2", "paypal-2"],
+    ]));
+  });
+
+  it("links eBay account debits to their bank debits", () => {
+    const records = [
+      record({ id: "ebay-debit", sourceKind: "ebay-ledger", category: "transfer", direction: "in", date: "2025-10-20", amount: 16.2, counterparty: "eBay" }),
+      record({ id: "bank-debit", sourceKind: "bank-fyrst", category: "cash-movement", direction: "out", date: "2025-10-21", amount: 16.2, counterparty: "eBay S.a.r.l." }),
+    ];
+    expect(runMatching(records).links).toEqual(expect.arrayContaining([
+      expect.objectContaining({ rule: "ebay-debit-bank", confidence: 99 }),
+    ]));
+  });
+
+  it("links an Etsy buyer-total invoice with a Sales-Tax warning", () => {
+    const records = [
+      record({ id: "sheryl-doc", sourceKind: "accountable-invoices", category: "document-income", direction: "in", date: "2025-09-07", amount: 47.23, counterparty: "Sheryl Howard" }),
+      record({ id: "sheryl-order", sourceKind: "etsy-sales", category: "order", direction: "in", date: "2025-09-07", amount: 42.26, counterparty: "Sheryl Howard", reference: "3793475703", shop: "Form", metadata: { listingAmount: 47.23 } }),
+    ];
+    const result = runMatching(records);
+    expect(result.links).toEqual(expect.arrayContaining([
+      expect.objectContaining({ rule: "etsy-buyer-total-sales-tax-warning" }),
+    ]));
+    expect(result.reviews).toEqual([
+      expect.objectContaining({ recordId: "sheryl-doc", status: "warning" }),
+    ]);
+  });
+
+  it("keeps an identified zero-value Etsy invoice as a data error", () => {
+    const records = [
+      record({ id: "leilani-doc", sourceKind: "accountable-invoices", category: "document-income", direction: "in", date: "2025-07-23", amount: 0, counterparty: "Leilani Moone" }),
+      record({ id: "leilani-order", sourceKind: "etsy-sales", category: "order", direction: "in", date: "2025-07-23", amount: 15.11, counterparty: "Leilani Moone", reference: "3750522805", shop: "Form", metadata: { listingAmount: 16.17 } }),
+    ];
+    const result = runMatching(records);
+    expect(result.links).toEqual(expect.arrayContaining([
+      expect.objectContaining({ rule: "etsy-zero-invoice-data-error" }),
+    ]));
+    expect(result.reviews).toEqual([
+      expect.objectContaining({ recordId: "leilani-doc", status: "data-error" }),
+    ]);
+    expect(coverageSummary(records, result.links, result.reviews).documents.open).toBe(1);
+  });
+
+  it("lets a manual clarification resolve a documented exception without deleting its note", () => {
+    const document = record({ id: "cursor-doc", sourceKind: "accountable-expenses", category: "document-expense", direction: "out", amount: 20, counterparty: "Cursor" });
+    const review = {
+      id: "review",
+      recordId: document.id,
+      status: "manual-cleared" as const,
+      note: "Privater Zahlungsweg ist bekannt.",
+      automatic: false,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+    const automaticWarning = {
+      ...review,
+      id: "automatic",
+      status: "warning" as const,
+      note: "Automatischer Hinweis",
+      automatic: true,
+    };
+    const coverage = coverageSummary([document], [], [automaticWarning, review]);
+    expect(coverage.documents).toEqual({ total: 1, resolved: 1, open: 0 });
+    expect(coverage.reviews.manualCleared).toBe(1);
+    expect(coverage.reviews.warnings).toBe(0);
+    expect(coverage.exceptions).toBe(0);
+  });
 });

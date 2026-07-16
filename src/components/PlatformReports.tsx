@@ -1,8 +1,8 @@
-import { AlertTriangle, CheckCircle2, Layers3, WalletCards } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Layers3 } from "lucide-react";
 import { useMemo, useState } from "react";
-import { buildPlatformSummaries, buildSettlementBatches } from "../lib/ledger";
+import { buildPlatformReconciliations, buildSettlementBatches } from "../lib/ledger";
 import { formatDate, formatMoney } from "../lib/normalize";
-import type { MatchLink, NormalizedRecord } from "../types";
+import type { MatchLink, NormalizedRecord, PlatformControlAxis } from "../types";
 
 interface PlatformReportsProps {
   records: NormalizedRecord[];
@@ -12,18 +12,27 @@ interface PlatformReportsProps {
 
 const BATCH_PAGE_SIZE = 20;
 
-function statusLabel(status: "balanced" | "roll-forward" | "attention"): string {
-  if (status === "balanced") return "Rechnerisch abgestimmt";
-  if (status === "roll-forward") return "Fortschreibung";
-  return "Prüfung nötig";
+function Axis({ axis }: { axis: PlatformControlAxis }) {
+  return (
+    <article className={`control-axis axis-${axis.state}`}>
+      <div>
+        {axis.state === "confirmed" ? <CheckCircle2 size={17} /> : <AlertTriangle size={17} />}
+        <strong>{axis.label}</strong>
+      </div>
+      <dl>
+        <div><dt>Soll</dt><dd>{formatMoney(axis.expected)}</dd></div>
+        <div><dt>Ist</dt><dd>{formatMoney(axis.actual)}</dd></div>
+        <div><dt>Differenz</dt><dd>{formatMoney(axis.difference)}</dd></div>
+      </dl>
+      <small>{axis.detail}</small>
+    </article>
+  );
 }
 
 export function PlatformReports({ records, links, year }: PlatformReportsProps) {
-  const summaries = useMemo(() => buildPlatformSummaries(records, links, year), [records, links, year]);
+  const controls = useMemo(() => buildPlatformReconciliations(records, links, year), [records, links, year]);
   const batches = useMemo(() => buildSettlementBatches(records, links), [records, links]);
   const recordMap = useMemo(() => new Map(records.map((record) => [record.id, record])), [records]);
-  const annual = summaries.filter((summary) => summary.period === String(year));
-  const monthly = summaries.filter((summary) => summary.period !== String(year));
   const [batchPage, setBatchPage] = useState(0);
   const [openBatch, setOpenBatch] = useState<string>();
   const batchPages = Math.max(1, Math.ceil(batches.length / BATCH_PAGE_SIZE));
@@ -32,71 +41,44 @@ export function PlatformReports({ records, links, year }: PlatformReportsProps) 
 
   return (
     <div className="view-stack">
-      <section className="page-heading">
-        <div>
-          <span className="eyebrow">Kontenfortschreibung</span>
-          <h1>Plattformen und Sammelzahlungen</h1>
-          <p>Einzelgeschäft, Zahlungskonto und Auszahlung bleiben getrennt nachvollziehbar.</p>
-        </div>
-      </section>
+      <section className="page-heading"><div><h1>Plattformabrechnungen</h1></div></section>
 
-      <section className="panel account-explainer">
-        <WalletCards size={22} />
-        <div>
-          <strong>PayPal ist ein eigenes Zwischenkonto.</strong>
-          <p>Eine Ausgabe kann aus PayPal-Guthaben bezahlt und trotzdem vollständig nachgewiesen sein. Etsy-Carry wird am Jahresende fortgeschrieben, statt künstlich einer Bankzeile zugeordnet zu werden.</p>
-        </div>
-      </section>
-
-      <section className="account-grid">
-        {annual.map((summary) => (
-          <article className="account-card" key={summary.id}>
-            <div className="account-card-head">
-              <div><span>{summary.currency}</span><h2>{summary.account}</h2></div>
-              <span className={`control-status control-${summary.status}`}>
-                {summary.status === "attention" ? <AlertTriangle size={14} /> : <CheckCircle2 size={14} />}
-                {statusLabel(summary.status)}
-              </span>
+      <section className="platform-control-list">
+        {controls.map((control) => (
+          <article className="platform-control-card" key={control.id}>
+            <header>
+              <div><span>{control.period}</span><h2>{control.platform}{control.shop ? ` · ${control.shop}` : ""}</h2></div>
+              <strong>{[control.documentAxis, control.feeDocumentAxis, control.platformAxis, control.paymentAxis].some((axis) => axis?.state === "open")
+                ? "Prüfen"
+                : [control.documentAxis, control.feeDocumentAxis, control.platformAxis, control.paymentAxis].some((axis) => axis?.state === "warning")
+                  ? "Mit Hinweis"
+                  : "Nachvollziehbar"}</strong>
+            </header>
+            <div className="platform-axis-grid">
+              <Axis axis={control.documentAxis} />
+              <Axis axis={control.platformAxis} />
+              <Axis axis={control.paymentAxis} />
             </div>
-            <dl>
-              <div><dt>Verkäuferumsatz / Rechnungen</dt><dd>{formatMoney(summary.sellerRevenue, summary.currency)}</dd></div>
-              <div><dt>Zahlungseingänge</dt><dd>{formatMoney(summary.inflows, summary.currency)}</dd></div>
-              <div><dt>Marketplace Tax</dt><dd>{formatMoney(summary.marketplaceTax, summary.currency)}</dd></div>
-              <div><dt>Gebühren</dt><dd>{formatMoney(summary.fees, summary.currency)}</dd></div>
-              <div><dt>Erstattungen</dt><dd>{formatMoney(summary.refunds, summary.currency)}</dd></div>
-              <div><dt>Auszahlungen / Belastungen</dt><dd>{formatMoney(summary.payouts + summary.charges, summary.currency)}</dd></div>
-              <div className="account-carry"><dt>{summary.reportedClosing != null ? "Gemeldeter Endbestand" : "Carry / Periodenbewegung"}</dt><dd>{formatMoney(summary.reportedClosing ?? summary.carry, summary.currency)}</dd></div>
+            {control.feeDocumentAxis && <div className="fee-control"><Axis axis={control.feeDocumentAxis} /></div>}
+            <dl className="platform-formula">
+              <div><dt>Käuferzahlungen</dt><dd>{formatMoney(control.buyerPayments)}</dd></div>
+              <div><dt>Marketplace Tax</dt><dd>{formatMoney(control.marketplaceTax)}</dd></div>
+              <div><dt>Verkäuferumsatz</dt><dd>{formatMoney(control.sellerRevenue)}</dd></div>
+              <div><dt>Gebühren brutto</dt><dd>{formatMoney(control.feeCharges)}</dd></div>
+              {control.feeCorrections > 0 && <div><dt>davon Gebührenkorrekturen</dt><dd>{formatMoney(-control.feeCorrections)}</dd></div>}
+              <div><dt>Gebühren netto</dt><dd>{formatMoney(control.fees)}</dd></div>
+              <div><dt>Erstattungen</dt><dd>{formatMoney(control.refunds)}</dd></div>
+              <div><dt>Anpassungen</dt><dd>{formatMoney(control.adjustments)}</dd></div>
+              <div><dt>Auszahlungen</dt><dd>{formatMoney(control.payouts)}</dd></div>
+              <div className="formula-result"><dt>Differenz / Übertrag</dt><dd>{formatMoney(control.carry)}</dd></div>
             </dl>
-            <p>{summary.note}</p>
           </article>
         ))}
       </section>
 
-      <section className="panel table-panel">
-        <div className="panel-heading account-table-heading">
-          <div><span className="panel-kicker">Monatliche Kontrolle</span><h2>{monthly.length.toLocaleString("de-DE")} Kontenperioden</h2></div>
-        </div>
-        <div className="table-wrap">
-          <table className="account-table">
-            <thead><tr><th>Periode</th><th>Konto</th><th>Währung</th><th className="numeric">Umsatz</th><th className="numeric">Steuer</th><th className="numeric">Gebühren</th><th className="numeric">Erstattungen</th><th className="numeric">Carry</th><th>Status</th></tr></thead>
-            <tbody>{monthly.map((summary) => (
-              <tr key={summary.id}>
-                <td>{summary.period}</td><td><strong>{summary.account}</strong></td><td>{summary.currency}</td>
-                <td className="numeric">{formatMoney(summary.sellerRevenue || summary.inflows, summary.currency)}</td>
-                <td className="numeric">{formatMoney(summary.marketplaceTax, summary.currency)}</td>
-                <td className="numeric">{formatMoney(summary.fees, summary.currency)}</td>
-                <td className="numeric">{formatMoney(summary.refunds, summary.currency)}</td>
-                <td className="numeric">{formatMoney(summary.reportedClosing ?? summary.carry, summary.currency)}</td>
-                <td><span className={`control-status control-${summary.status}`}>{statusLabel(summary.status)}</span></td>
-              </tr>
-            ))}</tbody>
-          </table>
-        </div>
-      </section>
-
       <section className="panel">
         <div className="panel-heading">
-          <div><span className="panel-kicker">Aufklappbare Beweisketten</span><h2>{batches.length.toLocaleString("de-DE")} Sammelgruppen</h2></div>
+          <div><span className="panel-kicker">Tatsächliche Sammelvorgänge</span><h2>{batches.length.toLocaleString("de-DE")} Gruppen</h2></div>
         </div>
         <div className="batch-list">
           {visibleBatches.map((batch) => {
@@ -107,7 +89,7 @@ export function PlatformReports({ records, links, year }: PlatformReportsProps) 
                   <Layers3 size={18} />
                   <span><strong>{batch.label}</strong><small>{batch.rule}</small></span>
                   <span>{formatMoney(batch.amount, batch.currency)}</span>
-                  <span className={`control-status ${batch.verified ? "control-balanced" : "control-attention"}`}>{batch.verified ? "Rechnerisch bestätigt" : "Prüfung nötig"}</span>
+                  <span className={`control-status ${batch.verified ? "control-balanced" : "control-attention"}`}>{batch.verified ? "Bestätigt" : "Prüfen"}</span>
                 </button>
                 {expanded && <div className="batch-members">
                   {batch.memberIds.map((id) => {
@@ -120,7 +102,7 @@ export function PlatformReports({ records, links, year }: PlatformReportsProps) 
             );
           })}
         </div>
-        <div className="pagination"><span>Seite {safeBatchPage + 1} von {batchPages}</span><div><button className="button button-ghost button-small" disabled={safeBatchPage === 0} onClick={() => setBatchPage((page) => page - 1)}>Zurück</button><button className="button button-ghost button-small" disabled={safeBatchPage >= batchPages - 1} onClick={() => setBatchPage((page) => page + 1)}>Weiter</button></div></div>
+        {batches.length > 0 && <div className="pagination"><span>Seite {safeBatchPage + 1} von {batchPages}</span><div><button className="button button-ghost button-small" disabled={safeBatchPage === 0} onClick={() => setBatchPage((page) => page - 1)}>Zurück</button><button className="button button-ghost button-small" disabled={safeBatchPage >= batchPages - 1} onClick={() => setBatchPage((page) => page + 1)}>Weiter</button></div></div>}
       </section>
     </div>
   );

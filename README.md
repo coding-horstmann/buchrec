@@ -28,12 +28,12 @@ Die Erkennung orientiert sich an Spalten und Datenstruktur, nicht ausschließlic
 
 ## Arbeitsablauf
 
-1. Alle Exporte gemeinsam importieren.
+1. Dateien in beliebig vielen Schritten zur Upload-Liste hinzufügen und erst mit „Prüfen“ einlesen. Identische Dateien werden anhand ihrer SHA-256-Prüfsumme ignoriert.
 2. Erkannte Quellen, Zeiträume und Warnungen kontrollieren.
 3. Unter „Regeln“ globale Testidentitäten pflegen und bei Bedarf je Shopify-Shop echte Kunden markieren. 0-Euro-Bestellungen bleiben automatisch Tests.
-4. Sichere automatische Zuordnungen und Vorschläge prüfen.
-5. Offene Fälle manuell verbinden oder als geklärt, Test beziehungsweise privat klassifizieren.
-6. Den Excel-Prüfbericht und optional eine lokale Projektdatei exportieren.
+4. Sichere automatische Zuordnungen im „Einzelabgleich“ und echte Sammelvorgänge unter „Plattformabrechnungen“ prüfen.
+5. Offene Fälle manuell verbinden oder mit „manuell geklärt“, „offen mit Anmerkung“, „Warnung“ beziehungsweise „Datenfehler“ bewerten.
+6. PDF, Excel-Prüfbericht, ZIP-Prüfpaket und optional eine lokale Projektdatei exportieren.
 
 Das Matching berücksichtigt unter anderem Referenzen, Beträge, Gegenparteien, Richtung, angegebene Zahlungsdaten, konfigurierbare Datumsabstände, Plattformauszahlungen, PayPal-Gegenläufe, Fremdwährungsumrechnungen und Printful-Geldbörsenaufladungen. PayPal- und Bankbewegungen werden nicht doppelt als Zahlung gezählt.
 
@@ -41,7 +41,7 @@ Die Prüfung unterscheidet drei Nachweise: Beleg beziehungsweise Bestellung, Zah
 
 Bei Etsy werden Verkäuferumsatz, von Etsy abgeführte Marketplace Sales Tax, Gebühren und Auszahlung getrennt geführt. Die vom Käufer zusätzlich gezahlte und von Etsy abgeführte Sales Tax erhöht nicht den mit Accountable abzugleichenden Rechnungsumsatz. Sammelauszahlungen werden nur dann automatisch verbunden, wenn ein einzelnes oder kombiniertes Auszahlungsfenster centgenau aufgeht.
 
-Unter „Konten & Sammel“ zeigt buchrec Monats- und Jahresfortschreibungen für Etsy-Shops, PayPal-Währungen, eBay, Shopify, Gelato, Printful und die vorhandenen Plattformrechnungen. Jahresendbestände werden als Carry ausgewiesen. Das lokale Prüfpaket enthält den Excel-Prüfbericht, Projektstand, Verfahrensbeschreibung und SHA-256-Prüfsummen der Originalimporte.
+Unter „Plattformabrechnungen“ zeigt buchrec für Etsy Form, Etsy Frida und eBay jeweils getrennt den Belegabgleich, das Plattformkonto und den Zahlungsnachweis. Jahresenddifferenzen werden als „Differenz / Übertrag“ ausgewiesen. Gelato, Printful, Printler, Art Heroes, Redbubble, Europosters, Albin Michel, Google und Shopify stehen getrennt im „Einzelabgleich“. Das lokale Prüfpaket enthält den aktuellen PDF- und Excel-Prüfbericht, Projektstand, Verfahrensbeschreibung und SHA-256-Prüfsummen der Originalimporte.
 
 Jede Zuordnung enthält Regel, Sicherheit, Betragsdifferenz und Datumsabstand. Teilzuordnungen bleiben in den Ausnahmen sichtbar, bis das Bankende der Kette nachgewiesen ist.
 

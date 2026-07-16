@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { MatchLink, NormalizedRecord } from "../types";
-import { buildPlatformSummaries, buildSettlementBatches } from "./ledger";
+import { buildPlatformReconciliations, buildPlatformSummaries, buildSettlementBatches } from "./ledger";
 
 function record(overrides: Partial<NormalizedRecord> & Pick<NormalizedRecord, "id" | "sourceKind" | "category" | "direction" | "amount">): NormalizedRecord {
   return {
@@ -64,5 +64,35 @@ describe("platform ledgers", () => {
       automatic: true,
     }];
     expect(buildSettlementBatches(records, links)[0]).toMatchObject({ account: "PayPal", amount: 100, memberCount: 2, verified: true });
+  });
+
+  it("separates eBay gross fees, corrections, net fees and bank-funded debits", () => {
+    const records = [
+      record({ id: "sale", sourceKind: "ebay-ledger", category: "sale", direction: "in", amount: 100, feeAmount: 15, metadata: { payoutId: "P-1" } }),
+      record({ id: "refund", sourceKind: "ebay-ledger", category: "refund", direction: "out", amount: 20, feeAmount: -3, metadata: { payoutId: "P-1" } }),
+      record({ id: "fee", sourceKind: "ebay-ledger", category: "fee", direction: "out", amount: 2, metadata: { payoutId: "P-1" } }),
+      record({ id: "fee-credit", sourceKind: "ebay-ledger", category: "fee", direction: "in", amount: 2, metadata: { payoutId: "P-1" } }),
+      record({ id: "debit", sourceKind: "ebay-ledger", category: "transfer", direction: "in", amount: 20, metadata: { payoutId: "P-1" } }),
+      record({ id: "payout", sourceKind: "ebay-ledger", category: "payout", direction: "in", amount: 78, metadata: { payoutId: "P-1" } }),
+      record({ id: "income-doc", sourceKind: "accountable-invoices", category: "document-income", direction: "in", amount: 80, counterparty: "eBay" }),
+      record({ id: "fee-doc", sourceKind: "accountable-expenses", category: "document-expense", direction: "out", amount: 12, counterparty: "Ebay GmbH" }),
+      record({ id: "bank-in", sourceKind: "bank-fyrst", category: "cash-movement", direction: "in", amount: 78, counterparty: "eBay" }),
+      record({ id: "bank-out", sourceKind: "bank-fyrst", category: "cash-movement", direction: "out", amount: 20, counterparty: "eBay" }),
+    ];
+    const links: MatchLink[] = [
+      { id: "sale-doc", fromId: "sale", toId: "income-doc", type: "document-order", confidence: 100, amountDifference: 0, rule: "test", reason: "test", automatic: true },
+      { id: "payout-bank", fromId: "payout", toId: "bank-in", type: "payout-bank", confidence: 100, amountDifference: 0, rule: "test", reason: "test", automatic: true },
+      { id: "debit-bank", fromId: "debit", toId: "bank-out", type: "payout-bank", confidence: 100, amountDifference: 0, rule: "test", reason: "test", automatic: true },
+    ];
+    const control = buildPlatformReconciliations(records, links, 2025)[0];
+    expect(control).toMatchObject({
+      platform: "eBay",
+      sellerRevenue: 80,
+      feeCharges: 17,
+      feeCorrections: 5,
+      fees: 12,
+    });
+    expect(control.feeDocumentAxis).toMatchObject({ expected: 12, actual: 12, difference: 0 });
+    expect(control.paymentAxis).toMatchObject({ expected: 58, actual: 58, difference: 0 });
   });
 });

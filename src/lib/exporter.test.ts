@@ -5,14 +5,15 @@ import { createDemoProject } from "./demo";
 import { buildAuditPackage } from "./exporter";
 
 describe("audit package", () => {
-  it("contains the workbook, manifest, project and procedure documentation", () => {
+  it("contains PDF, workbook, manifest, project and procedure documentation", async () => {
     const project = createDemoProject();
-    const archive = unzipSync(buildAuditPackage(project));
+    const archive = unzipSync(await buildAuditPackage(project));
 
     expect(Object.keys(archive).sort()).toEqual([
       "VERFAHRENSDOKUMENTATION.txt",
       "manifest.json",
       "projekt.json",
+      "pruefbericht.pdf",
       "pruefbericht.xlsx",
     ]);
 
@@ -38,5 +39,6 @@ describe("audit package", () => {
       "Ausnahmen",
     ]));
     expect(strFromU8(archive["VERFAHRENSDOKUMENTATION.txt"])).toContain("Original-CSV-/Excel-Dateien");
+    expect(strFromU8(archive["pruefbericht.pdf"].slice(0, 4))).toBe("%PDF");
   });
 });
