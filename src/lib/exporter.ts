@@ -383,7 +383,7 @@ export async function buildAuditPdf(project: BuchrecProject): Promise<Uint8Array
     }
     drawPdfText(
       context,
-      `Käufer ${formatMoney(control.buyerPayments)}; Marketplace Tax ${formatMoney(control.marketplaceTax)}; Buyer Fees ${formatMoney(control.buyerFees)}; Verkäuferumsatz ${formatMoney(control.sellerRevenue)}; für Rechnungen relevant ${formatMoney(control.documentRevenue)}; Gebühren brutto ${formatMoney(control.feeCharges)}, Gebührenkorrekturen ${formatMoney(-control.feeCorrections)}, Gebühren netto ${formatMoney(control.fees)}, Erstattungen ${formatMoney(control.refunds)}, Anpassungen ${formatMoney(control.adjustments)}, Auszahlungen ${formatMoney(control.payouts)}.`,
+      `Käufer ${formatMoney(control.buyerPayments)}; Marketplace Tax ${formatMoney(control.marketplaceTax)}; Buyer Fees ${formatMoney(control.buyerFees)}; Verkäuferumsatz ${formatMoney(control.sellerRevenue)}; für Rechnungen relevant ${formatMoney(control.documentRevenue)}; Gebühren brutto ${formatMoney(control.feeCharges)}, Gebührenkorrekturen ${formatMoney(-control.feeCorrections)}, Gebühren netto ${formatMoney(control.fees)}, Erstattungen ${formatMoney(control.refunds)}, Anpassungen ${formatMoney(control.adjustments)}, Auszahlungen ${formatMoney(control.payouts)}, Differenz/Übertrag ${formatMoney(control.carry)}.`,
       { size: 7.8, color: PDF_MUTED, gap: 8 },
     );
   }
