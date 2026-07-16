@@ -73,6 +73,19 @@ describe("matching", () => {
     expect(coverageSummary(records, runMatching(records).links).bridges).toEqual({ total: 1, resolved: 1, open: 0 });
   });
 
+  it("uses the related PayPal merchant to identify a bank-funded purchase", () => {
+    const records = [
+      record({ id: "merchant", sourceKind: "paypal-business", category: "cash-movement", direction: "out", date: "2025-02-05", amount: 14.96, counterparty: "Gelato AS", reference: "merchant-tx" }),
+      record({ id: "funding", sourceKind: "paypal-business", category: "transfer", direction: "in", date: "2025-02-05", amount: 14.96, counterparty: "PayPal", reference: "funding-tx", description: "Bankgutschrift auf PayPal-Konto", metadata: { relatedTransaction: "merchant-tx" } }),
+      record({ id: "bank", sourceKind: "bank-fyrst", category: "cash-movement", direction: "out", date: "2025-02-07", amount: 14.96, counterparty: "PayPal (Europe)", description: "Gelato AS, Ihr Einkauf bei Gelato AS" }),
+    ];
+    const result = runMatching(records);
+    expect(result.links).toEqual(expect.arrayContaining([
+      expect.objectContaining({ fromId: "bank", toId: "funding", type: "paypal-bank-bridge", rule: "paypal-bank-merchant-context" }),
+    ]));
+    expect(coverageSummary(records, result.links).payments).toEqual({ total: 1, resolved: 1, open: 0 });
+  });
+
   it("does not force a weak amount-only match", () => {
     const records = [
       record({ id: "doc", sourceKind: "accountable-expenses", category: "document-expense", direction: "out", date: "2025-01-01", amount: 20, counterparty: "A" }),

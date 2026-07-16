@@ -331,7 +331,9 @@ tbody tr:hover { background: #fafcf9; }
   .brand-subtitle, .header-actions .button-ghost { display: none; }
   .sidebar { position: fixed; z-index: 30; top: auto; right: 0; bottom: 0; width: auto; height: 66px; padding: 7px; border-top: 1px solid var(--line); border-right: 0; }
   .sidebar nav { grid-template-columns: repeat(7, 1fr); }
-  .nav-item { display: flex; min-width: 48px; flex-direction: column; gap: 2px; padding: 6px; font-size: .58rem; text-align: center; }
+  .nav-item { display: flex; min-width: 48px; flex-direction: column; gap: 2px; padding: 6px 3px; font-size: .58rem; text-align: center; }
+  .nav-item span { width: 100%; font-size: 0; }
+  .nav-item span::after { content: attr(data-mobile-label); font-size: .55rem; }
   .nav-item strong, .sidebar-note { display: none; }
   .content { padding: 28px 15px 92px; }
   .content.with-sidebar { width: 100%; margin-left: 0; }

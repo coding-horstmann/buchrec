@@ -184,13 +184,13 @@ export function makeId(...parts: unknown[]): string {
 }
 
 export function referenceTokens(...values: unknown[]): string[] {
-  const ignored = new Set(["2025", "2026", "eur", "invoice", "rechnung", "payment", "bestellung"]);
+  const ignored = new Set(["eur", "invoice", "rechnung", "payment", "bestellung"]);
   return Array.from(
     new Set(
       values
         .flatMap((value) => normalizeText(value).match(/[a-z0-9][a-z0-9_-]{3,}/g) ?? [])
         .map((token) => token.replace(/^#+/, ""))
-        .filter((token) => token.length >= 4 && !ignored.has(token)),
+        .filter((token) => token.length >= 4 && !ignored.has(token) && !/^(?:19|20|21)\d{2}$/.test(token)),
     ),
   );
 }

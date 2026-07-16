@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeHeader, parseAmount, parseDate, similarity } from "./normalize";
+import { normalizeHeader, parseAmount, parseDate, referenceTokens, similarity } from "./normalize";
 
 describe("normalization", () => {
   it("parses German and international amounts", () => {
@@ -23,5 +23,10 @@ describe("normalization", () => {
   it("normalizes headers and compares counterparties", () => {
     expect(normalizeHeader("Gebühren & Steuern")).toBe("gebuhren steuern");
     expect(similarity("Google Ireland Limited", "GOOGLE Ireland")).toBeGreaterThan(0.5);
+  });
+
+  it("ignores standalone years without fixing the matcher to specific tax years", () => {
+    expect(referenceTokens("Rechnung 2027 AB-4711")).toEqual(["ab-4711"]);
+    expect(referenceTokens("Archiv 2031 Rechnung XZ-9000")).toEqual(["archiv", "xz-9000"]);
   });
 });

@@ -1259,6 +1259,41 @@ function bestGlobalAssignment(
   return solve(0, 0).pairs;
 }
 
+function explicitPayPalFundingLinks(records: NormalizedRecord[]): MatchLink[] {
+  const paypal = records.filter((record) => active(record) && isPayPal(record));
+  const byReference = new Map(paypal.map((record) => [record.reference, record]));
+  const banks = records.filter(
+    (record) => active(record) && isBank(record) && record.direction === "out" && normalizeText(`${record.counterparty} ${record.description}`).includes("paypal"),
+  );
+  const candidates: PayPalBankCandidate[] = [];
+  for (const funding of paypal.filter((record) =>
+    record.category === "transfer" && record.direction === "in" && normalizeText(record.description).includes("bankgutschrift")
+  )) {
+    const merchant = byReference.get(String(funding.metadata.relatedTransaction ?? ""));
+    const merchantName = normalizeText(merchant?.counterparty ?? "");
+    if (merchantName.length < 4) continue;
+    for (const bank of banks) {
+      if (bank.currency !== funding.currency || closestAmountDifference(bank, funding) > 0.02) continue;
+      const days = dateDifferenceDays(bank.date, funding.date);
+      if (days === undefined || days > 10) continue;
+      const bankText = normalizeText(`${bank.counterparty} ${bank.description}`);
+      if (!bankText.includes(merchantName)) continue;
+      candidates.push({ bank, paypal: funding, days, cost: days, structured: true });
+    }
+  }
+  return bestGlobalAssignment(banks, candidates).map((assignment) =>
+    makeLink(
+      assignment.bank,
+      assignment.paypal,
+      "paypal-bank-bridge",
+      100,
+      "paypal-bank-merchant-context",
+      `PayPal-Bankgutschrift über Betrag, Händler im Banktext und ${assignment.days} Tage Abstand zugeordnet`,
+      true,
+    ),
+  );
+}
+
 function internalTransferLinks(records: NormalizedRecord[]): MatchLink[] {
   const banks = records.filter(
     (record) =>
@@ -1833,6 +1868,7 @@ export function runMatching(records: NormalizedRecord[], dateTolerance = 20, amo
     ...providerDocuments,
     ...etsyReviewed.links,
     ...creditNoteRefundLinks(records),
+    ...explicitPayPalFundingLinks(records),
     ...internalTransferLinks(records),
     ...bankInternalLinks(records),
     ...platformAggregate,

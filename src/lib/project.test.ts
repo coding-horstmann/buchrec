@@ -40,6 +40,10 @@ function parsed(id: string, fileName: string, contentHash: string): ParsedFileRe
 }
 
 describe("project imports", () => {
+  it("names new projects for the previous tax year without a fixed calendar year", () => {
+    expect(createProject().name).toBe(`Buchhaltung ${new Date().getFullYear() - 1}`);
+  });
+
   it("keeps Etsy account aliases on their configured canonical shop", () => {
     const aliases = createProject().settings.etsyShopAliases;
     expect(canonicalEtsyShop("FantasiasFloralesCo", aliases)).toBe("Frida");

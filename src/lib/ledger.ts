@@ -380,6 +380,38 @@ function platformBankTotal(
   }, 0));
 }
 
+function platformBankTotalIncludingRecognizableRows(
+  payouts: NormalizedRecord[],
+  records: NormalizedRecord[],
+  adjacency: Map<string, Set<string>>,
+): { total: number; unmatched: number } {
+  const recordMap = new Map(records.map((record) => [record.id, record]));
+  const connectedBanks = new Set<string>();
+  for (const payout of payouts) {
+    for (const id of connected(payout.id, adjacency)) {
+      const record = recordMap.get(id);
+      if (record && (record.sourceKind === "bank-fyrst" || record.sourceKind === "bank-n26")) connectedBanks.add(id);
+    }
+  }
+  const connectedRows = [...connectedBanks].map((id) => recordMap.get(id)!).filter(Boolean);
+  const ibans = new Set(connectedRows.map((record) => String(record.metadata.iban ?? "")).filter(Boolean));
+  const parties = new Set(connectedRows.map((record) => normalizeText(record.counterparty)).filter(Boolean));
+  const directions = new Set(payouts.map((record) => record.direction));
+  const currencies = new Set(payouts.map((record) => record.currency));
+  const recognizable = records.filter((record) => {
+    if (record.sourceKind !== "bank-fyrst" && record.sourceKind !== "bank-n26") return false;
+    if (!directions.has(record.direction) || !currencies.has(record.currency)) return false;
+    const iban = String(record.metadata.iban ?? "");
+    return (Boolean(iban) && ibans.has(iban)) || parties.has(normalizeText(record.counterparty));
+  });
+  const ids = new Set([...connectedBanks, ...recognizable.map((record) => record.id)]);
+  const total = roundMoney([...ids].reduce((sum, id) => {
+    const record = recordMap.get(id);
+    return record ? sum + (record.direction === "out" ? -record.amount : record.amount) : sum;
+  }, 0));
+  return { total, unmatched: [...ids].filter((id) => !connectedBanks.has(id)).length };
+}
+
 function connectedDocuments(
   platformRecords: NormalizedRecord[],
   records: NormalizedRecord[],
@@ -477,7 +509,7 @@ export function buildPlatformReconciliations(
     const statementPayouts = platformRecords.filter((record) => record.sourceKind === "etsy-statement" && record.category === "payout");
     const bankPayoutRecords = transferPayouts.length ? transferPayouts : statementPayouts;
     const executedPayouts = roundMoney(bankPayoutRecords.reduce((sum, record) => sum + record.amount, 0));
-    const bankTotal = platformBankTotal(bankPayoutRecords, activeRecords, adjacency);
+    const bankEvidence = platformBankTotalIncludingRecognizableRows(bankPayoutRecords, activeRecords, adjacency);
     result.push({
       id: makeId("platform-control", "etsy", shop, year),
       platform: "Etsy",
@@ -487,7 +519,7 @@ export function buildPlatformReconciliations(
       documentAxis: controlAxis("Accountable-Rechnungen ↔ Etsy-Verkäufe-CSV", documentRevenue, accountableSales, "Rechnungsrelevanter Verkäuferumsatz ohne Marketplace Tax, Buyer Fees und vollständig erstattete Bestellungen"),
       feeDocumentAxis: controlAxis("Accountable-Eingangsrechnungen ↔ Etsy-Monatsabrechnungen", fees, accountableFees, "Etsy-Gebühren abzüglich Gutschriften; Marketplace Tax und Buyer Fees sind ausgeschlossen"),
       platformAxis: balanceAxis("Etsy-Zahlungskonto · Übertrag", carry, "Fortgeschriebene Periodenbewegung; kein Soll-Null und kein automatischer Fehler"),
-      paymentAxis: controlAxis("Etsy-Auszahlungs-CSV ↔ FYRST/N26", executedPayouts, bankTotal, "Nur als ausgeführt gekennzeichnete Etsy-Auszahlungen; zurückgegebene Auszahlungen sind ausgeschlossen"),
+      paymentAxis: controlAxis("Etsy-Auszahlungs-CSV ↔ FYRST/N26", executedPayouts, bankEvidence.total, `Alle anhand Gegenpartei oder Bankkennung eindeutig dem Shop zuordenbaren Bankbewegungen; ${bankEvidence.unmatched} ohne direkte Auszahlungsverknüpfung`),
       sellerRevenue,
       documentRevenue,
       buyerPayments,
@@ -570,7 +602,7 @@ export function buildPlatformReconciliations(
       platform: "eBay",
       period: String(year),
       currency: "EUR",
-      documentAxis: controlAxis("Accountable ↔ eBay-Verkäufe", sellerRevenue, accountableSales, "Verkäufe abzüglich Erstattungen gegen Ausgangsrechnungen"),
+      documentAxis: controlAxis("Accountable-Rechnungen ↔ eBay-Verkäufe/Erstattungen aus CSV", sellerRevenue, accountableSales, "Verkäufe abzüglich Erstattungen aus der eBay-Abrechnungs-/Transaktions-CSV gegen Ausgangsrechnungen"),
       feeDocumentAxis: controlAxis("Accountable-Eingangsrechnungen ↔ eBay-Gebührenabrechnung", invoiceFeeExpected, accountableFees, "Je Abrechnungsmonat wird die ausgewiesene Brutto- oder Nettogebühr verwendet; Korrekturen bleiben separat sichtbar"),
       platformAxis: balanceAxis("eBay-Zahlungskonto · Übertrag", carry, "Fortgeschriebene Verkäufe, Erstattungen, Gebühren und Auszahlungen; kein Soll-Null"),
       paymentAxis: controlAxis("eBay-Auszahlungen/Belastungen ↔ Bank", expectedBank, bankTotal, "Auszahlungen und Rückerstattungszuführungen bis FYRST/N26 verfolgt"),

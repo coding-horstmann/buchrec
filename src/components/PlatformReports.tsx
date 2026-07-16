@@ -76,7 +76,6 @@ export function PlatformReports({ records, links, year }: PlatformReportsProps) 
               <div><dt>Erstattungen</dt><dd>{formatMoney(control.refunds)}</dd></div>
               <div><dt>Anpassungen</dt><dd>{formatMoney(control.adjustments)}</dd></div>
               <div><dt>Auszahlungen</dt><dd>{formatMoney(control.payouts)}</dd></div>
-              <div className="formula-result"><dt>Differenz / Übertrag</dt><dd>{formatMoney(control.carry)}</dd></div>
             </dl>
           </article>
         ))}

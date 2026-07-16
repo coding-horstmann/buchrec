@@ -72,6 +72,21 @@ describe("platform ledgers", () => {
     expect(control.paymentAxis).toMatchObject({ expected: 60, actual: 60, difference: 0 });
   });
 
+  it("includes recognizable Etsy bank rows even when their direct payout link is missing", () => {
+    const records = [
+      record({ id: "sale", sourceKind: "etsy-sales", category: "order", direction: "in", amount: 100, shop: "Form", metadata: { listingAmount: 100 } }),
+      record({ id: "executed", sourceKind: "etsy-transfers", category: "payout", direction: "in", amount: 60, shop: "Form" }),
+      record({ id: "bank-linked", sourceKind: "bank-fyrst", category: "cash-movement", direction: "in", amount: 60, counterparty: "Etsy Payments Ireland Limited", metadata: { iban: "NL03SHOP" } }),
+      record({ id: "bank-extra", sourceKind: "bank-fyrst", category: "cash-movement", direction: "in", amount: 25, counterparty: "Etsy Payments Ireland Limited", metadata: { iban: "NL03SHOP" } }),
+    ];
+    const links: MatchLink[] = [
+      { id: "payout-bank", fromId: "executed", toId: "bank-linked", type: "payout-bank", confidence: 100, amountDifference: 0, rule: "test", reason: "test", automatic: true },
+    ];
+    const control = buildPlatformReconciliations(records, links, 2025)[0];
+    expect(control.paymentAxis).toMatchObject({ expected: 60, actual: 85, difference: 25, state: "open" });
+    expect(control.paymentAxis.detail).toContain("1 ohne direkte Auszahlungsverknüpfung");
+  });
+
   it("reconciles a PayPal currency against its reported balance", () => {
     const records = [
       record({ id: "income", sourceKind: "paypal-business", category: "cash-movement", direction: "in", date: "2025-04-15", amount: 684.91, metadata: { net: 684.91, balance: 684.91, time: "12:00:00" } }),

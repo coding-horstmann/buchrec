@@ -6,7 +6,7 @@ export function createProject(): BuchrecProject {
   const now = new Date().toISOString();
   return {
     version: 1,
-    name: "Buchhaltung 2025",
+    name: `Buchhaltung ${new Date().getFullYear() - 1}`,
     createdAt: now,
     updatedAt: now,
     settings: {
