@@ -1,8 +1,8 @@
 import { CheckCircle2, Link2, Search, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { formatDate, formatMoney, normalizeText } from "../lib/normalize";
-import { isReconciliationRecord, reconciliationState } from "../lib/matching";
-import type { Disposition, MatchLink, NormalizedRecord } from "../types";
+import { isReconciliationRecord, reconciliationAxes, reconciliationState } from "../lib/matching";
+import type { Disposition, EvidenceState, MatchLink, NormalizedRecord } from "../types";
 
 interface RecordsTableProps {
   records: NormalizedRecord[];
@@ -14,9 +14,20 @@ interface RecordsTableProps {
 
 const PAGE_SIZE = 100;
 
+function EvidenceTag({ state, reason }: { state: EvidenceState; reason: string }) {
+  const label = {
+    confirmed: "bestätigt",
+    open: "offen",
+    excluded: "ausgeschlossen",
+    "not-applicable": "nicht nötig",
+  }[state];
+  return <span className={`status-tag evidence-${state}`} title={reason}>{label}</span>;
+}
+
 export function RecordsTable({ records, links, onlyExceptions = false, onDisposition, onManualLink }: RecordsTableProps) {
   const linkedIds = useMemo(() => new Set(links.filter((link) => !link.rejected).flatMap((link) => [link.fromId, link.toId])), [links]);
   const state = useMemo(() => reconciliationState(records, links), [records, links]);
+  const axes = useMemo(() => reconciliationAxes(records, links), [records, links]);
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(0);
   const [selected, setSelected] = useState<string[]>([]);
@@ -42,11 +53,18 @@ export function RecordsTable({ records, links, onlyExceptions = false, onDisposi
         </div>
         <div className="table-wrap">
           <table className="records-table">
-            <thead><tr><th><input type="checkbox" aria-label="Sichtbare Datensätze auswählen" checked={visible.length > 0 && visible.every((record) => selected.includes(record.id))} onChange={(event) => setSelected(event.target.checked ? [...new Set([...selected, ...visible.map((record) => record.id)])] : selected.filter((id) => !visible.some((record) => record.id === id)))} /></th><th>Datum</th><th>Quelle</th><th>Gegenpartei / Referenz</th><th>Art</th><th>Status</th><th className="numeric">Betrag</th></tr></thead>
-            <tbody>{visible.map((record) => <tr key={record.id} className={selected.includes(record.id) ? "selected-row" : ""}>
+            <thead><tr><th><input type="checkbox" aria-label="Sichtbare Datensätze auswählen" checked={visible.length > 0 && visible.every((record) => selected.includes(record.id))} onChange={(event) => setSelected(event.target.checked ? [...new Set([...selected, ...visible.map((record) => record.id)])] : selected.filter((id) => !visible.some((record) => record.id === id)))} /></th><th>Datum</th><th>Quelle</th><th>Gegenpartei / Referenz</th><th>Art</th><th>Beleg</th><th>Zahlung</th><th>Konto</th><th className="numeric">Betrag</th></tr></thead>
+            <tbody>{visible.map((record) => {
+              const evidence = axes.get(record.id);
+              return <tr key={record.id} className={selected.includes(record.id) ? "selected-row" : ""}>
               <td><input type="checkbox" checked={selected.includes(record.id)} onChange={() => setSelected((current) => current.includes(record.id) ? current.filter((id) => id !== record.id) : [...current, record.id])} aria-label={`${record.reference || record.description} auswählen`} /></td>
-              <td>{formatDate(record.date)}</td><td><span className="source-name">{record.sourceFile}</span></td><td><strong>{record.counterparty || "–"}</strong><small>{record.reference || record.description || "–"}</small></td><td><span className="tag">{record.category}</span></td><td><span className={`status-tag status-${state.resolved.has(record.id) ? "linked" : record.disposition}`}>{state.resolved.has(record.id) ? "vollständig" : linkedIds.has(record.id) ? "teilweise" : record.disposition}</span></td><td className={`numeric amount-${record.direction}`}>{formatMoney(record.amount, record.currency)}</td>
-            </tr>)}</tbody>
+              <td>{formatDate(record.date)}</td><td><span className="source-name">{record.sourceFile}</span></td><td><strong>{record.counterparty || "–"}</strong><small>{record.reference || record.description || "–"}</small></td><td><span className="tag">{record.category}</span></td>
+              <td>{evidence ? <EvidenceTag state={evidence.businessEvidence} reason={evidence.businessReason} /> : <span className="muted">–</span>}</td>
+              <td>{evidence ? <EvidenceTag state={evidence.paymentEvidence} reason={evidence.paymentReason} /> : <span className="muted">–</span>}</td>
+              <td>{evidence ? <EvidenceTag state={evidence.accountEvidence} reason={evidence.accountReason} /> : <span className="muted">{linkedIds.has(record.id) ? "verbunden" : "–"}</span>}</td>
+              <td className={`numeric amount-${record.direction}`}>{formatMoney(record.amount, record.currency)}</td>
+            </tr>;
+            })}</tbody>
           </table>
         </div>
         <div className="pagination"><span>Seite {page + 1} von {pages}</span><div><button className="button button-ghost button-small" disabled={page === 0} onClick={() => setPage((value) => value - 1)}>Zurück</button><button className="button button-ghost button-small" disabled={page >= pages - 1} onClick={() => setPage((value) => value + 1)}>Weiter</button></div></div>

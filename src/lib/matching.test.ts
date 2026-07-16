@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { NormalizedRecord } from "../types";
-import { coverageSummary, runMatching } from "./matching";
+import { coverageSummary, reconciliationAxes, runMatching } from "./matching";
 
 function record(overrides: Partial<NormalizedRecord> & Pick<NormalizedRecord, "id" | "category" | "direction" | "amount">): NormalizedRecord {
   return {
@@ -145,5 +145,90 @@ describe("matching", () => {
     expect(coverageSummary(records, result.links).documents.open).toBe(0);
     expect(coverageSummary(records, result.links).orders.open).toBe(0);
     expect(records.find((entry) => entry.id === "etsy-order")?.amount).toBe(28.47);
+  });
+
+  it("uses Accountable payment dates when the invoice date is outside the tolerance", () => {
+    const records = [
+      record({ id: "albin-doc", sourceKind: "accountable-invoices", category: "document-income", direction: "in", date: "2025-03-11", paymentDate: "2025-04-17", amount: 400, counterparty: "Éditions Albin Michel" }),
+      record({ id: "albin-bank", sourceKind: "bank-fyrst", category: "cash-movement", direction: "in", date: "2025-04-17", amount: 400, counterparty: "ALBIN MICHEL" }),
+    ];
+    const result = runMatching(records);
+    expect(result.links[0]).toMatchObject({ type: "document-payment", dateDifference: 0 });
+    expect(coverageSummary(records, result.links).documents.open).toBe(0);
+  });
+
+  it("traces PayPal credits through a running-balance batch to one bank payout", () => {
+    const records = [
+      record({ id: "red-doc", sourceKind: "accountable-invoices", category: "document-income", direction: "in", date: "2025-04-02", amount: 225.71, counterparty: "Redbubble Inc." }),
+      record({ id: "art-doc", sourceKind: "accountable-invoices", category: "document-income", direction: "in", date: "2025-04-15", amount: 459.2, counterparty: "Art Heroes (We Make It Work B.V.)" }),
+      record({ id: "red-paypal", sourceKind: "paypal-business", category: "cash-movement", direction: "in", date: "2025-04-15", amount: 225.71, counterparty: "Redbubble Inc.", metadata: { gross: 225.71, net: 225.71, balance: 225.71, time: "00:53:55" } }),
+      record({ id: "art-paypal", sourceKind: "paypal-business", category: "cash-movement", direction: "in", date: "2025-04-15", amount: 459.2, counterparty: "Werk aan de Muur / Art Heroes", metadata: { gross: 459.2, net: 459.2, balance: 684.91, time: "17:01:24" } }),
+      record({ id: "paypal-withdrawal", sourceKind: "paypal-business", category: "transfer", direction: "out", date: "2025-04-16", amount: 684.91, counterparty: "PayPal", description: "Allgemeine Abbuchung – Bankkonto", metadata: { gross: -684.91, net: -684.91, balance: 0, time: "01:24:48" } }),
+      record({ id: "bank", sourceKind: "bank-fyrst", category: "cash-movement", direction: "in", date: "2025-04-16", amount: 684.91, counterparty: "PayPal Europe", description: "ABBUCHUNG VOM PAYPAL-KONTO" }),
+    ];
+    const result = runMatching(records);
+    expect(result.links.filter((link) => link.rule === "paypal-running-balance-batch")).toHaveLength(2);
+    expect(coverageSummary(records, result.links).documents.open).toBe(0);
+    expect(reconciliationAxes(records, result.links).get("art-doc")?.accountReason).toContain("FYRST");
+  });
+
+  it("accepts a Gelato expense paid from a balanced PayPal balance without a duplicate bank debit", () => {
+    const records = [
+      record({ id: "gelato-doc", sourceKind: "accountable-expenses", category: "document-expense", direction: "out", date: "2025-04-24", amount: 68.85, counterparty: "Gelato" }),
+      record({ id: "gelato-order", sourceKind: "gelato", category: "wallet-charge", direction: "out", date: "2025-04-24", amount: 68.85, counterparty: "Gelato", reference: "G-250424150841" }),
+      record({ id: "gelato-paypal", sourceKind: "paypal-business", category: "cash-movement", direction: "out", date: "2025-04-24", amount: 68.85, counterparty: "Gelato ASA", metadata: { gross: -68.85, net: -68.85, balance: 3531.35, time: "15:14:07" } }),
+    ];
+    const result = runMatching(records);
+    const axes = reconciliationAxes(records, result.links).get("gelato-doc");
+    expect(axes).toMatchObject({ businessEvidence: "confirmed", paymentEvidence: "confirmed", accountEvidence: "confirmed" });
+    expect(coverageSummary(records, result.links).documents.open).toBe(0);
+  });
+
+  it("matches Printler EUR invoices to unique SEK PayPal receipts without inventing an exact EUR leg", () => {
+    const records = [
+      record({ id: "printler-doc", sourceKind: "accountable-invoices", category: "document-income", direction: "in", date: "2025-02-03", amount: 283.72, currency: "EUR", counterparty: "Printler Group AB" }),
+      record({ id: "printler-paypal", sourceKind: "paypal-business", category: "cash-movement", direction: "in", date: "2025-02-05", amount: 3355.26, currency: "SEK", counterparty: "Printler Group AB", metadata: { gross: 3355.26, net: 3355.26, balance: 3355.26 } }),
+    ];
+    const result = runMatching(records);
+    expect(result.links[0]).toMatchObject({ type: "foreign-exchange", rule: "printler-paypal-fx-window", confidence: 93 });
+    expect(result.links[0].reason).toContain("EUR-Gegenseite fehlt");
+  });
+
+  it("shows a confirmed order link separately from an open payment account", () => {
+    const records = [
+      record({ id: "buyer-doc", sourceKind: "accountable-invoices", category: "document-income", direction: "in", date: "2025-12-30", amount: 74.04, counterparty: "Andrew Dye" }),
+      record({ id: "buyer-order", sourceKind: "etsy-sales", category: "order", direction: "in", date: "2025-12-30", amount: 74.04, counterparty: "Andrew Dye" }),
+    ];
+    const result = runMatching(records);
+    expect(reconciliationAxes(records, result.links).get("buyer-doc")).toMatchObject({
+      businessEvidence: "confirmed",
+      paymentEvidence: "open",
+      accountEvidence: "open",
+    });
+  });
+
+  it("uses an exact unique full-year merchant match when Accountable has a clearly wrong date", () => {
+    const records = [
+      record({ id: "late-doc", sourceKind: "accountable-expenses", category: "document-expense", direction: "out", date: "2025-12-09", amount: 1800.1, counterparty: "Printler Group AB" }),
+      record({ id: "early-bank", sourceKind: "bank-fyrst", category: "cash-movement", direction: "out", date: "2025-07-24", amount: 1800.1, counterparty: "PayPal Europe", description: "Ihr Einkauf bei Printler Group AB" }),
+    ];
+    const result = runMatching(records);
+    expect(result.links[0]).toMatchObject({ rule: "unique-yearly-exact-merchant-payment", confidence: 91 });
+    expect(result.links[0].reason).toContain("Datumsabweichung");
+  });
+
+  it("accepts Printful orders paid from a cent-exact balanced provider wallet", () => {
+    const records = [
+      record({ id: "printful-doc", sourceKind: "accountable-expenses", category: "document-expense", direction: "out", date: "2025-05-01", amount: 20, counterparty: "Printful" }),
+      record({ id: "printful-order", sourceKind: "printful-orders", category: "wallet-charge", direction: "out", date: "2025-05-01", amount: 20, counterparty: "Printful", reference: "PF-1" }),
+      record({ id: "printful-funding", sourceKind: "printful-wallet", category: "wallet-funding", direction: "out", date: "2025-04-30", amount: 20, counterparty: "Printful" }),
+    ];
+    const result = runMatching(records);
+    expect(reconciliationAxes(records, result.links).get("printful-doc")).toMatchObject({
+      businessEvidence: "confirmed",
+      paymentEvidence: "confirmed",
+      accountEvidence: "confirmed",
+    });
+    expect(coverageSummary(records, result.links).documents.open).toBe(0);
   });
 });

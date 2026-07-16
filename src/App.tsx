@@ -3,13 +3,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppHeader } from "./components/AppHeader";
 import { MatchesPanel } from "./components/MatchesPanel";
 import { Overview } from "./components/Overview";
+import { PlatformReports } from "./components/PlatformReports";
 import { RecordsTable } from "./components/RecordsTable";
 import { RulesPanel } from "./components/RulesPanel";
 import { ShopifyReview } from "./components/ShopifyReview";
 import { Sidebar, type ViewKey } from "./components/Sidebar";
 import { SourcesPanel } from "./components/SourcesPanel";
 import { UploadPanel } from "./components/UploadPanel";
-import { exportAuditWorkbook } from "./lib/exporter";
+import { exportAuditPackage } from "./lib/exporter";
 import { createDemoProject } from "./lib/demo";
 import { applyGlobalTestIdentities, applyShopifyAllowList, parseImportFile } from "./lib/importer";
 import { runMatchingInBrowser } from "./lib/matching-client";
@@ -170,7 +171,7 @@ function App() {
 
   return (
     <div className="app-shell">
-      <AppHeader hasData={hasData} year={project.settings.year} saveState={saveState} onExportProject={() => downloadProject(project)} onExportAudit={() => exportAuditWorkbook(project)} onDelete={() => void handleDelete()} />
+      <AppHeader hasData={hasData} year={project.settings.year} saveState={saveState} onExportProject={() => downloadProject(project)} onExportAudit={() => exportAuditPackage(project)} onDelete={() => void handleDelete()} />
       <div className="app-body">
         {hasData && <Sidebar active={view} counts={{ sources: project.sources.length, matches: activeLinkCount, exceptions: coverage.exceptions, records: project.records.length }} onChange={setView} />}
         <main className={`content ${hasData ? "with-sidebar" : "welcome-content"}`}>
@@ -180,6 +181,7 @@ function App() {
           {hasData && view === "overview" && <Overview coverage={coverage} hasData={hasData} candidateCount={project.candidates.length} sourceCount={project.sources.length} linkCount={activeLinkCount} warningCount={warningCount} onNavigate={setView} />}
           {hasData && view === "sources" && <div className="view-stack"><SourcesPanel sources={project.sources} onShopChange={handleShopChange} onRemove={handleSourceRemove} /><UploadPanel busy={busy} progress={progress} onFiles={handleFiles} onProjectFile={handleProjectFile} /></div>}
           {hasData && view === "matches" && <MatchesPanel links={project.links} candidates={project.candidates} records={project.records} onAccept={handleAccept} onReject={handleReject} />}
+          {hasData && view === "accounts" && <PlatformReports records={project.records} links={project.links} year={project.settings.year} />}
           {hasData && view === "exceptions" && <RecordsTable records={project.records} links={project.links} onlyExceptions onDisposition={handleDisposition} onManualLink={handleManualLink} />}
           {hasData && view === "records" && <RecordsTable records={project.records} links={project.links} onDisposition={handleDisposition} onManualLink={handleManualLink} />}
           {hasData && view === "rules" && <div className="view-stack"><RulesPanel settings={project.settings} onChange={handleSettings} /><ShopifyReview records={project.records} rules={project.settings.shopifyRules} onApply={handleShopifyRule} /></div>}

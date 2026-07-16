@@ -41,6 +41,7 @@ const SIGNATURES: Signature[] = [
   { kind: "bank-n26", required: ["booking date", "partner name", "amount eur", "original currency"] },
   { kind: "bank-dkb-ignored", required: ["buchungsdatum", "zahlungspflichtige r", "zahlungsempfanger in", "betrag"] },
   { kind: "etsy-sales", required: ["payment id", "order id", "gross amount", "net amount", "order date"] },
+  { kind: "etsy-sold-orders", required: ["sale date", "order id", "full name", "order value", "order net"] },
   { kind: "etsy-transfers", required: ["date", "amount", "status", "bank account ending digits"] },
   { kind: "etsy-statement", required: ["datum", "art", "titel", "gebuhren steuern", "netto"] },
   { kind: "ebay-orders", required: ["verkaufsprotokollnummer", "bestellnummer", "gesamtbetrag", "verkauft am"] },
@@ -232,6 +233,7 @@ function parseAccountableExpenses(source: SourceImport, rows: RowObject[], map: 
     return [{
       ...base,
       date: parseDate(value(row, map, "Buchungsdatum")),
+      paymentDate: parseDate(value(row, map, "Zahlungsdatum")),
       amount,
       currency: String(value(row, map, "Währung") || "EUR"),
       counterparty: supplier,
@@ -284,6 +286,7 @@ function parseAccountableInvoices(source: SourceImport, rows: RowObject[], map: 
       ...base,
       date: parseDate(firstValue("Rechnungsdatum")),
       dueDate: parseDate(firstValue("Fälligkeitsdatum")),
+      paymentDate: parseDate(firstValue("Zahlungsdatum")),
       amount,
       currency: String(firstValue("Währung") || "EUR"),
       counterparty: customer,
@@ -315,6 +318,9 @@ function parseFyrst(source: SourceImport, rows: RowObject[], map: Map<string, st
     const counterparty = String(value(row, map, "Begünstigter / Auftraggeber") ?? "").trim();
     const purpose = String(value(row, map, "Verwendungszweck") ?? "").trim();
     const reference = String(value(row, map, "Kundenreferenz", "Mandatsreferenz") ?? "");
+    const iban = String(value(row, map, "IBAN / Kontonummer") ?? "").replace(/\s+/g, "").toUpperCase();
+    const ownerTransfer = normalizeText(counterparty) === "niklas horstmann";
+    const n26Transfer = iban === "DE31100110012511694946";
     return [{
       ...base,
       date,
@@ -323,10 +329,15 @@ function parseFyrst(source: SourceImport, rows: RowObject[], map: Map<string, st
       reference,
       relatedReferences: referenceTokens(reference, purpose, value(row, map, "Mandatsreferenz")),
       description: purpose || String(value(row, map, "Umsatzart") || "Bankbewegung"),
+      disposition: ownerTransfer && !n26Transfer ? "private" : base.disposition,
+      dispositionReason: ownerTransfer && !n26Transfer
+        ? (base.direction === "out" ? "Privatentnahme des Inhabers" : "Privateinlage des Inhabers")
+        : n26Transfer ? "Interne Überweisung FYRST → N26" : undefined,
       metadata: compactMetadata({
         valueDate: value(row, map, "Wert"),
         transactionType: value(row, map, "Umsatzart"),
-        iban: value(row, map, "IBAN / Kontonummer"),
+        iban,
+        ownAccount: n26Transfer,
       }),
     }];
   });
@@ -337,6 +348,7 @@ function parsePayPal(source: SourceImport, rows: RowObject[], map: Map<string, s
     const gross = parseAmount(value(row, map, "Brutto"));
     const net = parseAmount(value(row, map, "Netto"));
     const fee = parseAmount(value(row, map, "Entgelt"));
+    const balance = parseAmount(value(row, map, "Guthaben"));
     const description = String(value(row, map, "Beschreibung") ?? "").trim();
     const normalizedDescription = normalizeText(description);
     if (!gross && !net && !description) return [];
@@ -362,6 +374,7 @@ function parsePayPal(source: SourceImport, rows: RowObject[], map: Map<string, s
         gross,
         fee,
         net,
+        balance,
         relatedTransaction: related,
         invoiceNumber: value(row, map, "Rechnungsnummer"),
       }),
@@ -432,6 +445,60 @@ function parseEtsySales(source: SourceImport, rows: RowObject[], map: Map<string
   });
 }
 
+function parseEtsySoldOrders(source: SourceImport, rows: RowObject[], map: Map<string, string>): NormalizedRecord[] {
+  return rows.flatMap((row, index) => {
+    const orderId = String(value(row, map, "Order ID") ?? "").trim();
+    const orderValue = Math.abs(parseAmount(value(row, map, "Order Value")));
+    const discount = Math.abs(parseAmount(value(row, map, "Discount Amount")));
+    const shippingDiscount = Math.abs(parseAmount(value(row, map, "Shipping Discount")));
+    const shipping = Math.abs(parseAmount(value(row, map, "Shipping")));
+    const orderTotal = Math.abs(parseAmount(value(row, map, "Order Total")));
+    const processingFees = Math.abs(parseAmount(value(row, map, "Card Processing Fees")));
+    const orderNet = Math.abs(parseAmount(value(row, map, "Order Net")));
+    const adjustedTotal = Math.abs(parseAmount(value(row, map, "Adjusted Order Total")));
+    const adjustedFees = Math.abs(parseAmount(value(row, map, "Adjusted Card Processing Fees")));
+    const adjustedNet = Math.abs(parseAmount(value(row, map, "Adjusted Net Order Amount")));
+    const hasAdjustment = adjustedTotal > 0 || adjustedFees > 0 || adjustedNet > 0;
+    const sellerRevenue = roundMoney(
+      hasAdjustment
+        ? adjustedNet + adjustedFees
+        : orderNet + processingFees || Math.max(0, orderValue - discount - shippingDiscount + shipping),
+    );
+    if (!orderId && !sellerRevenue) return [];
+    const marketplaceTax = roundMoney(Math.max(0, (hasAdjustment ? adjustedTotal : orderTotal) - sellerRevenue));
+    const base = recordBase(source, source.headerRow + index + 1, "order-detail", "in", sellerRevenue);
+    const buyer = String(value(row, map, "Full Name", "Buyer") ?? "").trim();
+    return [{
+      ...base,
+      date: parseDate(value(row, map, "Sale Date"), "mdy"),
+      settlementAmount: hasAdjustment ? adjustedNet : orderNet,
+      feeAmount: hasAdjustment ? adjustedFees : processingFees,
+      currency: String(value(row, map, "Currency") || "EUR"),
+      counterparty: buyer,
+      reference: orderId,
+      relatedReferences: referenceTokens(orderId, value(row, map, "Buyer User ID"), value(row, map, "SKU")),
+      description: `Etsy Sold Order ${orderId}`,
+      metadata: compactMetadata({
+        orderId,
+        buyer,
+        orderValue,
+        discount,
+        shippingDiscount,
+        shipping,
+        orderTotal,
+        sellerRevenue,
+        marketplaceTax,
+        paymentProcessingFees: hasAdjustment ? adjustedFees : processingFees,
+        payoutContribution: hasAdjustment ? adjustedNet : orderNet,
+        adjusted: hasAdjustment,
+        status: value(row, map, "Status"),
+        paymentMethod: value(row, map, "Payment Method"),
+        sku: value(row, map, "SKU"),
+      }),
+    }];
+  });
+}
+
 function parseEtsyTransfers(source: SourceImport, rows: RowObject[], map: Map<string, string>): NormalizedRecord[] {
   return rows.flatMap((row, index) => {
     const amount = Math.abs(parseAmount(value(row, map, "Amount")));
@@ -475,6 +542,7 @@ function parseEtsyStatement(source: SourceImport, rows: RowObject[], map: Map<st
     else if (normalizedType.includes("uberweisung")) { category = "payout"; direction = "in"; }
     else if (normalizedType.includes("zahlung")) { category = "transfer"; }
     const returnedDeposit = normalizeText(title).includes("returned deposit");
+    const marketplaceTax = normalizedType === "tax" && normalizeText(`${title} ${info}`).includes("sales tax");
     const amount = Math.abs(payoutAmount || gross || net);
     const base = recordBase(source, source.headerRow + index + 1, category, direction, amount);
     return [{
@@ -495,6 +563,7 @@ function parseEtsyStatement(source: SourceImport, rows: RowObject[], map: Map<st
         info,
         orderId,
         sellerRevenue: category === "sale" ? Math.abs(gross || net) : 0,
+        marketplaceTax,
         feesAndTaxes: fee,
         payoutContribution: net,
         payoutAmount: category === "payout" ? amount : 0,
@@ -681,10 +750,12 @@ function parsePrintfulWallet(source: SourceImport, rows: RowObject[], map: Map<s
 
 function parseGelato(source: SourceImport, rows: RowObject[], map: Map<string, string>): NormalizedRecord[] {
   return rows.flatMap((row, index) => {
-    const amount = Math.abs(parseAmount(value(row, map, "Total Charge")));
+    const signedTotal = parseAmount(value(row, map, "Total Charge"));
+    const amount = Math.abs(signedTotal);
     const reference = String(value(row, map, "Reference ID") ?? "");
     if (!amount && !reference) return [];
-    const base = recordBase(source, source.headerRow + index + 1, "wallet-charge", "out", amount);
+    const refunded = signedTotal < 0;
+    const base = recordBase(source, source.headerRow + index + 1, refunded ? "refund" : "wallet-charge", refunded ? "in" : "out", amount);
     return [{
       ...base,
       date: parseDate(value(row, map, "Date")),
@@ -692,8 +763,8 @@ function parseGelato(source: SourceImport, rows: RowObject[], map: Map<string, s
       counterparty: "Gelato",
       reference,
       relatedReferences: referenceTokens(reference),
-      description: `Gelato-Auftrag ${reference}`,
-      metadata: compactMetadata({ productCharge: value(row, map, "Product Charge"), shippingCharge: value(row, map, "Shipping Charge"), vatCharge: value(row, map, "VAT Charge") }),
+      description: refunded ? `Gelato-Erstattung ${reference}` : `Gelato-Auftrag ${reference}`,
+      metadata: compactMetadata({ signedTotal, productCharge: value(row, map, "Product Charge"), shippingCharge: value(row, map, "Shipping Charge"), vatCharge: value(row, map, "VAT Charge") }),
     }];
   });
 }
@@ -708,6 +779,7 @@ function parseRecords(source: SourceImport, rows: RowObject[], headers: string[]
     case "bank-n26": return parseN26(source, rows, map);
     case "bank-dkb-ignored": return [];
     case "etsy-sales": return parseEtsySales(source, rows, map);
+    case "etsy-sold-orders": return parseEtsySoldOrders(source, rows, map);
     case "etsy-transfers": return parseEtsyTransfers(source, rows, map);
     case "etsy-statement": return parseEtsyStatement(source, rows, map);
     case "ebay-orders": return parseEbayOrders(source, rows, map);
@@ -740,13 +812,22 @@ function sourceWarnings(kind: SourceKind, records: NormalizedRecord[], shop?: st
   return warnings;
 }
 
-function buildSource(file: File, table: TableData, headers: string[], headerIndex: number, kind: SourceKind, shop?: string): SourceImport {
+function buildSource(
+  file: File,
+  table: TableData,
+  headers: string[],
+  headerIndex: number,
+  kind: SourceKind,
+  contentHash: string,
+  shop?: string,
+): SourceImport {
   const fingerprint = makeId(kind, ...headers.map(normalizeHeader).sort());
   return {
     id: makeId(file.name, file.size, table.sheetName, fingerprint),
     fileName: file.name,
     fileSize: file.size,
     fingerprint,
+    contentHash,
     kind,
     label: SOURCE_LABELS[kind],
     shop,
@@ -756,6 +837,11 @@ function buildSource(file: File, table: TableData, headers: string[], headerInde
     warnings: [],
     ignored: kind === "bank-dkb-ignored" || kind === "unknown",
   };
+}
+
+async function fileContentHash(file: File): Promise<string> {
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 async function fileTables(file: File): Promise<TableData[]> {
@@ -777,6 +863,7 @@ async function fileTables(file: File): Promise<TableData[]> {
 export async function parseImportFile(file: File): Promise<ParsedFileResult> {
   const sources: SourceImport[] = [];
   const records: NormalizedRecord[] = [];
+  const contentHash = await fileContentHash(file);
   for (const table of await fileTables(file)) {
     if (!table.rows.length) continue;
     const headerIndex = findHeaderIndex(table.rows);
@@ -785,7 +872,7 @@ export async function parseImportFile(file: File): Promise<ParsedFileResult> {
     if (/\.xlsx?$/i.test(file.name) && !kind.startsWith("accountable")) continue;
     const map = headerMap(headers);
     const shop = inferShop(file.name, rows, map, kind);
-    const source = buildSource(file, table, headers, headerIndex, kind, shop);
+    const source = buildSource(file, table, headers, headerIndex, kind, contentHash, shop);
     const parsedRecords = parseRecords(source, rows, headers);
     const dated = parsedRecords.map((record) => record.date).filter((date): date is string => Boolean(date)).sort();
     source.rowCount = parsedRecords.length || rows.length;

@@ -52,9 +52,11 @@ export function Overview({ coverage, hasData, candidateCount, sourceCount, linkC
       </section>
 
       <section className="coverage-grid">
-        <CoverageCard icon={FileCheck2} label="Accountable-Belege" resolved={coverage.documents.resolved} total={coverage.documents.total} detail={`${coverage.documents.open} Belege ohne belastbare Zuordnung`} />
+        <CoverageCard icon={FileCheck2} label="Beleg ↔ Bestellung" resolved={coverage.documentEvidence.resolved} total={coverage.documentEvidence.total} detail={`${coverage.documentEvidence.open} Belege ohne Auftrags- oder Plattformnachweis`} />
+        <CoverageCard icon={WalletCards} label="Zahlungsnachweis" resolved={coverage.paymentEvidence.resolved} total={coverage.paymentEvidence.total} detail={`${coverage.paymentEvidence.open} Belege ohne Zahlungs- oder Plattformkonto`} />
+        <CoverageCard icon={Landmark} label="Kontenabstimmung" resolved={coverage.accountEvidence.resolved} total={coverage.accountEvidence.total} detail={`${coverage.accountEvidence.open} Belege mit offener Kontenkette`} />
         <CoverageCard icon={Landmark} label="Bankzahlungen" resolved={coverage.payments.resolved} total={coverage.payments.total} detail={`${coverage.payments.open} FYRST- oder N26-Buchungen offen`} />
-        <CoverageCard icon={WalletCards} label="PayPal-Brücken" resolved={coverage.bridges.resolved} total={coverage.bridges.total} detail={`${coverage.bridges.open} PayPal-Buchungen ohne Bankende`} />
+        <CoverageCard icon={WalletCards} label="PayPal-Konto" resolved={coverage.bridges.resolved} total={coverage.bridges.total} detail={`${coverage.bridges.open} PayPal-Bewegungen ohne abgestimmtes Konto`} />
         <CoverageCard icon={ShoppingBag} label="Bestellungen" resolved={coverage.orders.resolved} total={Math.max(0, coverage.orders.total - coverage.orders.excluded)} detail={`${coverage.orders.excluded} Testbestellung${coverage.orders.excluded === 1 ? "" : "en"} ausgeschlossen`} />
       </section>
 

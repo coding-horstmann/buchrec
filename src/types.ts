@@ -6,6 +6,7 @@ export type SourceKind =
   | "bank-n26"
   | "bank-dkb-ignored"
   | "etsy-sales"
+  | "etsy-sold-orders"
   | "etsy-transfers"
   | "etsy-statement"
   | "ebay-orders"
@@ -23,6 +24,7 @@ export type RecordCategory =
   | "tax-payment"
   | "cash-movement"
   | "order"
+  | "order-detail"
   | "sale"
   | "fee"
   | "refund"
@@ -40,6 +42,7 @@ export interface SourceImport {
   fileName: string;
   fileSize: number;
   fingerprint: string;
+  contentHash?: string;
   kind: SourceKind;
   label: string;
   shop?: string;
@@ -65,6 +68,7 @@ export interface NormalizedRecord {
   direction: Direction;
   date?: string;
   dueDate?: string;
+  paymentDate?: string;
   amount: number;
   settlementAmount?: number;
   feeAmount?: number;
@@ -86,6 +90,8 @@ export type LinkType =
   | "payout-bank"
   | "paypal-related"
   | "paypal-bank-bridge"
+  | "account-batch"
+  | "foreign-exchange"
   | "internal-transfer"
   | "wallet-bridge"
   | "group-payment"
@@ -147,10 +153,60 @@ export interface MatchResult {
 
 export interface CoverageSummary {
   documents: { total: number; resolved: number; open: number };
+  documentEvidence: { total: number; resolved: number; open: number };
+  paymentEvidence: { total: number; resolved: number; open: number };
+  accountEvidence: { total: number; resolved: number; open: number };
   payments: { total: number; resolved: number; open: number };
   bridges: { total: number; resolved: number; open: number };
   orders: { total: number; resolved: number; excluded: number; open: number };
   exceptions: number;
+}
+
+export type EvidenceState = "confirmed" | "open" | "excluded" | "not-applicable";
+
+export interface ReconciliationAxes {
+  businessEvidence: EvidenceState;
+  paymentEvidence: EvidenceState;
+  accountEvidence: EvidenceState;
+  businessReason: string;
+  paymentReason: string;
+  accountReason: string;
+}
+
+export interface SettlementBatch {
+  id: string;
+  account: string;
+  label: string;
+  date?: string;
+  currency: string;
+  amount: number;
+  memberIds: string[];
+  memberCount: number;
+  rule: string;
+  verified: boolean;
+}
+
+export type AccountControlStatus = "balanced" | "roll-forward" | "attention";
+
+export interface PlatformPeriodSummary {
+  id: string;
+  account: string;
+  period: string;
+  currency: string;
+  inflows: number;
+  sellerRevenue: number;
+  marketplaceTax: number;
+  fees: number;
+  refunds: number;
+  charges: number;
+  payouts: number;
+  openingBalance?: number;
+  calculatedClosing?: number;
+  reportedClosing?: number;
+  residual?: number;
+  carry: number;
+  status: AccountControlStatus;
+  note: string;
 }
 
 export const SOURCE_LABELS: Record<SourceKind, string> = {
@@ -161,6 +217,7 @@ export const SOURCE_LABELS: Record<SourceKind, string> = {
   "bank-n26": "N26",
   "bank-dkb-ignored": "DKB · ausgeschlossen",
   "etsy-sales": "Etsy · Verkäufe",
+  "etsy-sold-orders": "Etsy · Sold Orders",
   "etsy-transfers": "Etsy · Überweisungen",
   "etsy-statement": "Etsy · Abrechnung",
   "ebay-orders": "eBay · Bestellungen",

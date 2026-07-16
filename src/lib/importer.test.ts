@@ -119,4 +119,54 @@ describe("file importer", () => {
     expect(etsyResult.records[0]).toMatchObject({ date: "2025-02-01", counterparty: "Full Buyer", amount: 32.55 });
     expect(ebayResult.records[0]).toMatchObject({ date: "2025-12-10", amount: 116.99 });
   });
+
+  it("imports Etsy Sold Orders with seller revenue excluding marketplace tax", async () => {
+    const file = csvFile(
+      "EtsySoldOrders2025 form.csv",
+      [
+        "Sale Date,Order ID,Buyer User ID,Full Name,Currency,Order Value,Discount Amount,Shipping Discount,Shipping,Sales Tax,Order Total,Card Processing Fees,Order Net,Adjusted Order Total,Adjusted Card Processing Fees,Adjusted Net Order Amount,Buyer,SKU",
+        "12/30/25,3935119409,kj7,Andrew Dye,EUR,82.27,8.23,0.00,0.00,0.00,80.85,3.53,70.51,0.00,0.00,0.00,Andrew Dye,\"sku-a,sku-b\"",
+      ].join("\n"),
+    );
+    const result = await parseImportFile(file);
+    expect(result.sources[0]).toMatchObject({ kind: "etsy-sold-orders", shop: "Form" });
+    expect(result.sources[0].contentHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(result.records[0]).toMatchObject({
+      category: "order-detail",
+      reference: "3935119409",
+      counterparty: "Andrew Dye",
+      amount: 74.04,
+      settlementAmount: 70.51,
+      feeAmount: 3.53,
+    });
+    expect(result.records[0].metadata.marketplaceTax).toBe(6.81);
+  });
+
+  it("keeps Gelato refunds and PayPal balances as account movements", async () => {
+    const gelato = csvFile(
+      "gelato.csv",
+      "Date,Reference ID,Product Charge,Shipping Charge,VAT Charge,Total Charge,Currency\n2025-12-11,G-1,73.39,10.10,0,-83.49,EUR",
+    );
+    const paypal = csvFile(
+      "paypal.csv",
+      "Datum,Beschreibung,Währung,Brutto,Entgelt,Netto,Guthaben,Transaktionscode,Zugehöriger Transaktionscode\n11.12.2025,Sammelzahlung,EUR,100,0,100,100,P-1,",
+    );
+    const [gelatoResult, paypalResult] = await Promise.all([parseImportFile(gelato), parseImportFile(paypal)]);
+    expect(gelatoResult.records[0]).toMatchObject({ category: "refund", direction: "in", amount: 83.49 });
+    expect(paypalResult.records[0].metadata.balance).toBe(100);
+  });
+
+  it("separates private owner withdrawals from the confirmed FYRST to N26 transfer", async () => {
+    const file = csvFile(
+      "fyrst.csv",
+      [
+        "Buchungstag;Wert;Umsatzart;Begünstigter / Auftraggeber;Verwendungszweck;IBAN / Kontonummer;Betrag;Soll;Haben;Währung",
+        "06.10.2025;06.10.2025;SEPA Überweisung;Niklas Horstmann;Werbung;DE31100110012511694946;-200;200;;EUR",
+        "20.10.2025;20.10.2025;SEPA Überweisung;Niklas Horstmann;;DE42120300001062505464;-1200;1200;;EUR",
+      ].join("\n"),
+    );
+    const result = await parseImportFile(file);
+    expect(result.records[0]).toMatchObject({ disposition: "active", dispositionReason: "Interne Überweisung FYRST → N26" });
+    expect(result.records[1]).toMatchObject({ disposition: "private", dispositionReason: "Privatentnahme des Inhabers" });
+  });
 });

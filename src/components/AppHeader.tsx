@@ -41,7 +41,7 @@ export function AppHeader({ hasData, year, saveState, onExportProject, onExportA
               <Download size={16} /> Projekt
             </button>
             <button className="button button-secondary button-compact" onClick={onExportAudit}>
-              <FileDown size={16} /> Prüfbericht
+              <FileDown size={16} /> Prüfpaket
             </button>
             <button className="icon-button danger" onClick={onDelete} aria-label="Alle lokalen Daten löschen" title="Alle lokalen Daten löschen">
               <Trash2 size={18} />

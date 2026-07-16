@@ -3,7 +3,8 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { applyGlobalTestIdentities, parseImportFile } from "../src/lib/importer";
 import { createProject } from "../src/lib/project";
-import { coverageSummary, runMatching } from "../src/lib/matching";
+import { buildPlatformSummaries, buildSettlementBatches } from "../src/lib/ledger";
+import { coverageSummary, reconciliationState, runMatching } from "../src/lib/matching";
 import type { NormalizedRecord, SourceImport, SourceKind } from "../src/types";
 
 async function filesIn(input: string): Promise<string[]> {
@@ -46,6 +47,21 @@ async function main() {
   ) as Partial<Record<SourceKind, { sources: number; records: number }>>;
   const classifiedRecords = applyGlobalTestIdentities(records, createProject().settings.testIdentities);
   const matching = runMatching(classifiedRecords, 20);
+  const controls = buildPlatformSummaries(classifiedRecords, matching.links, 2025);
+  const batches = buildSettlementBatches(classifiedRecords, matching.links);
+  const state = reconciliationState(classifiedRecords, matching.links);
+  const openDocumentsByCounterparty = Object.entries(
+    classifiedRecords
+      .filter((record) => record.category.startsWith("document") && state.open.has(record.id))
+      .reduce<Record<string, number>>((groups, record) => {
+        const key = record.counterparty || "(ohne Gegenpartei)";
+        groups[key] = (groups[key] ?? 0) + 1;
+        return groups;
+      }, {}),
+  )
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, 20)
+    .map(([counterparty, open]) => ({ counterparty, open }));
   const output = {
     files: paths.length,
     sources: sources.length,
@@ -55,6 +71,10 @@ async function main() {
     warningCount: sources.reduce((sum, source) => sum + source.warnings.length, 0),
     automaticLinks: matching.links.length,
     candidates: matching.candidates.length,
+    settlementBatches: batches.length,
+    annualAccountControls: controls.filter((control) => control.period === "2025").length,
+    attentionAccountControls: controls.filter((control) => control.period === "2025" && control.status === "attention").length,
+    openDocumentsByCounterparty,
     coverage: coverageSummary(classifiedRecords, matching.links),
   };
   process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);

@@ -35,9 +35,13 @@ Die Erkennung orientiert sich an Spalten und Datenstruktur, nicht ausschließlic
 5. Offene Fälle manuell verbinden oder als geklärt, Test beziehungsweise privat klassifizieren.
 6. Den Excel-Prüfbericht und optional eine lokale Projektdatei exportieren.
 
-Das Matching berücksichtigt unter anderem Referenzen, Beträge, Gegenparteien, Richtung, konfigurierbare Datumsabstände, Plattformauszahlungen, PayPal-Gegenläufe, Fremdwährungsumrechnungen und Printful-Geldbörsenaufladungen. PayPal wird dabei als Informationsbrücke behandelt und nicht als zweite Zahlung gezählt. Ein Accountable-Beleg gilt erst als vollständig, wenn seine Beweiskette FYRST oder N26 erreicht.
+Das Matching berücksichtigt unter anderem Referenzen, Beträge, Gegenparteien, Richtung, angegebene Zahlungsdaten, konfigurierbare Datumsabstände, Plattformauszahlungen, PayPal-Gegenläufe, Fremdwährungsumrechnungen und Printful-Geldbörsenaufladungen. PayPal- und Bankbewegungen werden nicht doppelt als Zahlung gezählt.
+
+Die Prüfung unterscheidet drei Nachweise: Beleg beziehungsweise Bestellung, Zahlung und Kontenabstimmung. PayPal wird als eigenes Zwischenkonto pro Währung über den laufenden Guthabenstand abgestimmt. Eine aus PayPal-Guthaben bezahlte Ausgabe benötigt daher keine identische Bankabbuchung. Sammelabbuchungen bleiben als aufklappbare Gruppen mit allen enthaltenen Bewegungen erhalten.
 
 Bei Etsy werden Verkäuferumsatz, von Etsy abgeführte Marketplace Sales Tax, Gebühren und Auszahlung getrennt geführt. Die vom Käufer zusätzlich gezahlte und von Etsy abgeführte Sales Tax erhöht nicht den mit Accountable abzugleichenden Rechnungsumsatz. Sammelauszahlungen werden nur dann automatisch verbunden, wenn ein einzelnes oder kombiniertes Auszahlungsfenster centgenau aufgeht.
+
+Unter „Konten & Sammel“ zeigt buchrec Monats- und Jahresfortschreibungen für Etsy-Shops, PayPal-Währungen, eBay, Shopify, Gelato, Printful und die vorhandenen Plattformrechnungen. Jahresendbestände werden als Carry ausgewiesen. Das lokale Prüfpaket enthält den Excel-Prüfbericht, Projektstand, Verfahrensbeschreibung und SHA-256-Prüfsummen der Originalimporte.
 
 Jede Zuordnung enthält Regel, Sicherheit, Betragsdifferenz und Datumsabstand. Teilzuordnungen bleiben in den Ausnahmen sichtbar, bis das Bankende der Kette nachgewiesen ist.
 
